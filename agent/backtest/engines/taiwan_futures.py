@@ -182,7 +182,18 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
         ``_direction`` is unused: TAIFEX charges the same tax and fee opening
         and closing. ``is_open`` is likewise symmetric, kept for the base-class
         signature.
+
+        Raises:
+            ValueError: ``_active_symbol`` is unset. BaseEngine assigns it before
+                every commission call; reaching here without it would price the
+                tax off a guessed multiplier, so fail loudly instead. Callers
+                outside the engine loop should use ``calc_commission_for_symbol``.
         """
+        if not self._active_symbol:
+            raise ValueError(
+                "TaiwanFuturesEngine.calc_commission needs _active_symbol; "
+                "call calc_commission_for_symbol(symbol, ...) outside the engine loop"
+            )
         return self.calc_commission_for_symbol(self._active_symbol, size, price, is_open)
 
     def calc_commission_for_symbol(
@@ -210,8 +221,22 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
     # ── Contract mechanics ──
 
     def get_contract_multiplier(self, symbol: str) -> float:
-        """NT$ per index point for this product (unknown -> 小台 as the safer default)."""
-        return float(_MULTIPLIER.get(_extract_product(symbol), 50.0))
+        """NT$ per index point for this product.
+
+        Raises:
+            ValueError: The product has no known multiplier. Guessing one would
+                silently mis-price PnL, margin and tax for the whole run, so an
+                unlisted TAIFEX product must be added to ``_MULTIPLIER`` (with
+                its verified contract spec) rather than approximated.
+        """
+        product = _extract_product(symbol)
+        multiplier = _MULTIPLIER.get(product)
+        if multiplier is None:
+            raise ValueError(
+                f"no contract multiplier for TAIFEX product {product!r} (symbol {symbol!r}); "
+                f"known: {sorted(_MULTIPLIER)}"
+            )
+        return float(multiplier)
 
     def get_initial_margin(self, symbol: str) -> float | None:
         """Absolute NT$ initial margin per contract, or None if unknown.

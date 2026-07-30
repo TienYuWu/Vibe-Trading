@@ -111,8 +111,10 @@ class TestContractMechanics:
         small = eng._calc_pnl("MXF2608", 1, 1, 20000.0, 20010.0)
         assert big == pytest.approx(small * 4)
 
-    def test_unknown_product_defaults_to_small_contract(self) -> None:
-        assert _futures_engine().get_contract_multiplier("ZZZ9999") == 50.0
+    def test_unknown_product_raises_instead_of_guessing(self) -> None:
+        """A guessed multiplier would silently mis-price PnL, margin and tax."""
+        with pytest.raises(ValueError, match="no contract multiplier"):
+            _futures_engine().get_contract_multiplier("ZZZ9999")
 
     def test_margin_is_absolute_not_price_scaled(self) -> None:
         """TAIFEX charges a fixed NT$ margin per contract."""
@@ -125,10 +127,14 @@ class TestContractMechanics:
         eng = _futures_engine(margin_override=100_000.0)
         assert eng._calc_margin("TXF2608", 3, 20000.0, eng.default_leverage) == pytest.approx(300_000.0)
 
-    def test_unknown_product_falls_back_to_rate_margin(self) -> None:
+    def test_rate_margin_fallback_for_listed_product_without_a_margin(self) -> None:
+        """A product with a multiplier but no exchange margin sizes off leverage."""
         eng = _futures_engine()
-        margin = eng._calc_margin("ZZZ9999", size=1, price=20000.0, leverage=20.0)
-        assert margin == pytest.approx(20000.0 * 50.0 / 20.0)
+        monkey = dict(taifex_margins.FALLBACK_INITIAL_MARGIN)
+        monkey.pop("TE", None)
+        taifex_margins._cache = monkey
+        margin = eng._calc_margin("TE2608.TAIFEX", size=1, price=1100.0, leverage=20.0)
+        assert margin == pytest.approx(1100.0 * _MULTIPLIER["TE"] / 20.0)
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +175,21 @@ class TestFuturesCosts:
     def test_configurable_rates(self) -> None:
         eng = _futures_engine(commission_per_lot=12.0, futures_tax_rate=0.0)
         assert eng.calc_commission_for_symbol("TXF2608", 2, 20000.0, True) == pytest.approx(24.0)
+
+    def test_commission_without_active_symbol_raises(self) -> None:
+        """BaseEngine sets _active_symbol; reaching here without it must not
+        silently price the tax off a guessed multiplier."""
+        eng = _futures_engine()
+        eng._active_symbol = ""
+        with pytest.raises(ValueError, match="_active_symbol"):
+            eng.calc_commission(1, 45000.0, 1, is_open=True)
+
+    def test_commission_uses_active_symbol_when_set(self) -> None:
+        eng = _futures_engine()
+        eng._active_symbol = "TXF2608"
+        assert eng.calc_commission(1, 45000.0, 1, is_open=True) == pytest.approx(
+            eng.calc_commission_for_symbol("TXF2608", 1, 45000.0, is_open=True)
+        )
 
     def test_slippage_always_hurts(self) -> None:
         eng = _futures_engine(slippage=0.001)
