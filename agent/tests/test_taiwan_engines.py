@@ -17,17 +17,29 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from backtest.engines import taifex_margins
 from backtest.engines._market_hooks import _detect_market
+from backtest.engines.taifex_margins import FALLBACK_INITIAL_MARGIN, parse_margin_rows
+
+_INITIAL_MARGIN = FALLBACK_INITIAL_MARGIN
 from backtest.engines.taiwan_equity import TaiwanEquityEngine
 from backtest.engines.taiwan_futures import (
     TaiwanFuturesEngine,
-    _INITIAL_MARGIN,
     _MULTIPLIER,
     _extract_product,
 )
 from backtest.loaders.finmind_loader import _resolve_dataset
 from backtest.loaders.registry import VALID_SOURCES
 from backtest.models import Position
+
+
+@pytest.fixture(autouse=True)
+def _pin_margins(monkeypatch):
+    """Pin the bundled margin snapshot so tests never touch the TAIFEX API."""
+    monkeypatch.setenv(taifex_margins.AUTOUPDATE_ENV, "0")
+    taifex_margins.reset_cache()
+    yield
+    taifex_margins.reset_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -346,3 +358,86 @@ class TestFinMindLoader:
 
 def test_every_margin_entry_has_a_multiplier() -> None:
     assert set(_INITIAL_MARGIN) <= set(_MULTIPLIER)
+
+
+def test_margins_scale_with_contract_size() -> None:
+    """小台 = 1/4 大台, 微台 = 1/20 大台 — margins must track the multipliers."""
+    big = _INITIAL_MARGIN["TXF"] / _MULTIPLIER["TXF"]
+    for product in ("MXF", "TMF"):
+        per_point = _INITIAL_MARGIN[product] / _MULTIPLIER[product]
+        assert per_point == pytest.approx(big, rel=0.02)
+
+
+class TestMarginAutoUpdate:
+    """The live-table path: parsing, gating, and fallback."""
+
+    def test_parses_official_rows(self) -> None:
+        rows = [
+            {"Contract": "臺股期貨", "ClearingMargin": "471000",
+             "MaintenanceMargin": "488000", "InitialMargin": "636000", "Date": "20260729"},
+            {"Contract": "小型臺指", "ClearingMargin": "117750",
+             "MaintenanceMargin": "122000", "InitialMargin": "159000", "Date": "20260729"},
+            {"Contract": "臺指選擇權風險保證金(A)值", "ClearingMargin": "125000",
+             "MaintenanceMargin": "130000", "InitialMargin": "169000", "Date": "20260729"},
+        ]
+        parsed = parse_margin_rows(rows)
+        assert parsed == {"TXF": 636000.0, "MXF": 159000.0}   # option A-value ignored
+
+    def test_skips_unparseable_and_zero_rows(self) -> None:
+        rows = [
+            {"Contract": "臺股期貨", "InitialMargin": "636,000"},   # thousands separator
+            {"Contract": "電子期貨", "InitialMargin": ""},          # blank
+            {"Contract": "金融期貨", "InitialMargin": "0"},         # zero
+            {"Contract": "未知新商品", "InitialMargin": "12345"},    # unmapped
+        ]
+        assert parse_margin_rows(rows) == {"TXF": 636000.0}
+
+    def test_env_gate_pins_the_snapshot(self, monkeypatch) -> None:
+        monkeypatch.setenv(taifex_margins.AUTOUPDATE_ENV, "0")
+        taifex_margins.reset_cache()
+        assert taifex_margins.get_initial_margins() == FALLBACK_INITIAL_MARGIN
+
+    def test_falls_back_when_the_api_fails(self, monkeypatch) -> None:
+        monkeypatch.setenv(taifex_margins.AUTOUPDATE_ENV, "1")
+        monkeypatch.setattr(taifex_margins, "_read_cache", lambda: None)
+
+        def _boom():
+            raise RuntimeError("TAIFEX unreachable")
+
+        monkeypatch.setattr(taifex_margins, "fetch_initial_margins", _boom)
+        taifex_margins.reset_cache()
+        assert taifex_margins.get_initial_margins() == FALLBACK_INITIAL_MARGIN
+
+    def test_live_values_win_over_the_snapshot(self, monkeypatch) -> None:
+        monkeypatch.setenv(taifex_margins.AUTOUPDATE_ENV, "1")
+        monkeypatch.setattr(taifex_margins, "_read_cache", lambda: None)
+        monkeypatch.setattr(taifex_margins, "_write_cache", lambda *a, **k: None)
+        monkeypatch.setattr(
+            taifex_margins, "fetch_initial_margins",
+            lambda: ({"TXF": 700000.0}, "20260901"),
+        )
+        taifex_margins.reset_cache()
+        margins = taifex_margins.get_initial_margins()
+        assert margins["TXF"] == 700000.0                       # refreshed
+        assert margins["MXF"] == FALLBACK_INITIAL_MARGIN["MXF"]  # untouched keys survive
+
+
+# Only the TAIEX-tracking contracts; TE (電子指數 ~1,100) and TF (金融指數 ~2,300)
+# track different underlyings, so REFERENCE_INDEX_LEVEL says nothing about them.
+_TAIEX_PRODUCTS = ("TXF", "MXF", "TMF")
+
+
+@pytest.mark.parametrize("product", _TAIEX_PRODUCTS)
+def test_implied_margin_rate_is_plausible(product: str) -> None:
+    """Guard against a stale TAIEX margin snapshot.
+
+    TAIFEX rescales margins as the index moves, so a pinned amount rots
+    silently: the TXF figure that was right near a 15,000 index implies a ~2%
+    margin at 45,000, which no exchange would set. Requiring 3%-20% of notional
+    at the reference index catches that drift instead of shipping wrong margin.
+    """
+    from backtest.engines.taiwan_futures import REFERENCE_INDEX_LEVEL
+
+    notional = REFERENCE_INDEX_LEVEL * _MULTIPLIER[product]
+    rate = _INITIAL_MARGIN[product] / notional
+    assert 0.03 <= rate <= 0.20, f"{product} implies a {rate:.1%} margin rate"

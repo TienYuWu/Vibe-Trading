@@ -6,7 +6,8 @@ Market rules (TAIFEX):
   - Price limit: ±10% from the previous settlement (stock-index products)
   - Contract multiplier: TXF=200, MXF=50, TMF=10 (NT$ per index point)
   - Margin: TAIFEX publishes an **absolute NT$ amount per contract**, not a
-    percentage — see ``_INITIAL_MARGIN`` and the ``_calc_margin`` override
+    percentage, and rescales it as the index moves — see ``_INITIAL_MARGIN``
+    and the ``_calc_margin`` override
   - Minimum trading unit: 1 contract
   - Cost stack (both sides): 期交稅 (futures transaction tax) 0.002% of notional
     + broker commission per lot
@@ -14,6 +15,9 @@ Market rules (TAIFEX):
 NOTE: TAIFEX revises margins and the exchange revises tax rates periodically.
 Every number below is a calibration knob — verify against the current TAIFEX
 margin table and your broker's schedule before trusting absolute cost figures.
+Margin figures here were read from the TAIFEX table on 2026-08-11; the tax rate
+and per-lot commission default have NOT been re-verified against a current
+schedule.
 
 TXO (臺指選擇權) is deliberately **not** handled here: options need premium-based
 margin and an option pricing/quote path, which lives in
@@ -28,6 +32,7 @@ import re
 import pandas as pd
 
 from backtest.engines.futures_base import FuturesBaseEngine
+from backtest.engines.taifex_margins import get_initial_margins
 
 
 # ── Contract multiplier (NT$ per index point) ──
@@ -40,15 +45,17 @@ _MULTIPLIER: dict[str, float] = {
     "TF": 1000.0,   # 金融期貨
 }
 
-# ── Initial margin, absolute NT$ per contract (TAIFEX table) ──
-
-_INITIAL_MARGIN: dict[str, float] = {
-    "TXF": 184000.0,
-    "MXF": 46000.0,
-    "TMF": 9200.0,
-    "TE": 138000.0,
-    "TF": 92000.0,
-}
+# ── Initial margin, absolute NT$ per contract ──
+#
+# Read from TAIFEX's official OpenAPI at runtime and cached for a day — see
+# ``taifex_margins``. Hard-coding is not viable: the exchange rescales margins
+# as the index moves, so a constant that was right near a 15,000 index implies
+# an impossible ~2% margin at 45,000. The bundled snapshot in that module is
+# only the offline fallback.
+#
+# Maintenance margin (維持保證金) is fetched but not modelled: BaseEngine has no
+# margin-call / forced-liquidation hook for futures, so acting on it would need
+# an engine-level change first.
 
 # ── Cost stack ──
 
@@ -60,9 +67,16 @@ DEFAULT_COMMISSION_PER_LOT = 20.0
 # Stock-index futures: ±10% of the previous settlement price.
 PRICE_LIMIT = 0.10
 
-# ~1 index point at a 20000 index level. TAIFEX index futures are quoted in
-# whole points, so a rate-based slippage is an approximation of a 1-tick fill.
-DEFAULT_SLIPPAGE = 0.00005
+# TAIFEX index futures are quoted in whole points, so rate-based slippage only
+# approximates a 1-tick fill. ~1 point at a 45,000 index level.
+DEFAULT_SLIPPAGE = 0.00002
+
+# TAIEX level used only to turn an absolute NT$ margin into a plausible leverage
+# for position sizing. Known products post their exchange margin directly (see
+# ``_calc_margin``), so this matters only for unlisted contracts. It assumes a
+# TAIEX-tracking product — TE (電子) and TF (金融) track different indices.
+# Override via ``reference_index_level`` when the index moves materially.
+REFERENCE_INDEX_LEVEL = 45000.0
 
 
 def _extract_product(symbol: str) -> str:
@@ -102,14 +116,16 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
         # unknown products.
         codes = config.get("codes", [])
         product = _extract_product(codes[0]) if codes else ""
-        margin_abs = config.get("margin_override") or _INITIAL_MARGIN.get(product)
+        margin_abs = config.get("margin_override") or get_initial_margins().get(product)
         cm = _MULTIPLIER.get(product)
+        reference = config.get("reference_index_level", REFERENCE_INDEX_LEVEL)
         if margin_abs and cm:
-            # implied leverage at the exchange's own reference: margin covers
-            # roughly a 20000-point index, i.e. notional = 20000 * multiplier
-            leverage = (20000.0 * cm) / float(margin_abs)
+            # Implied leverage at a reference index level. _calc_margin below
+            # uses the absolute NT$ margin for known products, so this only
+            # affects sizing for unlisted ones.
+            leverage = (float(reference) * cm) / float(margin_abs)
         else:
-            leverage = 20.0
+            leverage = 14.0   # ~TXF at 636k margin, 45k index
         config = {**config, "leverage": leverage}
         super().__init__(config)
 
@@ -198,10 +214,14 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
         return float(_MULTIPLIER.get(_extract_product(symbol), 50.0))
 
     def get_initial_margin(self, symbol: str) -> float | None:
-        """Absolute NT$ initial margin per contract, or None if unknown."""
+        """Absolute NT$ initial margin per contract, or None if unknown.
+
+        Reads the live TAIFEX table (cached for a day, falling back to the
+        bundled snapshot offline).
+        """
         if self._margin_override:
             return float(self._margin_override)
-        margin = _INITIAL_MARGIN.get(_extract_product(symbol))
+        margin = get_initial_margins().get(_extract_product(symbol))
         return float(margin) if margin is not None else None
 
     def _calc_margin(
