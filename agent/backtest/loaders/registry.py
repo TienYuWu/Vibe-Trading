@@ -54,6 +54,7 @@ VALID_SOURCES: set[str] = {
     "pykrx",
     "longbridge",
     "mt5",
+    "finmind",
     "local",
     "auto",
 }
@@ -104,6 +105,7 @@ def _ensure_registered() -> None:
         "backtest.loaders.pykrx_loader",
         "backtest.loaders.longbridge",
         "backtest.loaders.mt5_loader",
+        "backtest.loaders.finmind_loader",
         "backtest.loaders.local_loader",
     ]
     import importlib
@@ -139,6 +141,10 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "hk_equity": ["eastmoney", "yahoo", "futu", "yfinance", "akshare", "longbridge", "local"],
     "india_equity": ["yahoo", "yfinance", "india_broker", "local"],
     "kr_equity":   ["pykrx", "yahoo", "yfinance", "local"],
+    # Taiwan: FinMind is the only free source carrying TAIFEX futures; Yahoo
+    # covers TWSE cash equities as NNNN.TW but has no derivatives at all.
+    "tw_equity": ["finmind", "yahoo", "yfinance", "local"],
+    "tw_futures": ["finmind", "local"],
     # OKX first (native), then dedicated Binance, then generic CCXT / Yahoo.
     "crypto":    ["okx", "binance", "ccxt", "yfinance", "local"],
     "futures":   ["tushare", "akshare", "local"],

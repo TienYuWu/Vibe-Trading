@@ -32,6 +32,15 @@ _MARKET_PATTERNS = [
     (re.compile(r"^[A-Z0-9&.\-]+\.(NS|BO)$", re.I), "india_equity"),
     # Korea equities: KOSPI (005930.KS) / KOSDAQ (247540.KQ), 6-digit codes.
     (re.compile(r"^\d{6}\.(KS|KQ)$", re.I), "kr_equity"),
+    # Taiwan equities: TWSE (2330.TW) / TPEx (6488.TWO); ETF codes run to six
+    # alphanumerics (0050.TW, 00632R.TW).
+    (re.compile(r"^[0-9][0-9A-Z]{3,5}\.(TW|TWO)$", re.I), "tw_equity"),
+    # TAIFEX index futures. Must precede the global-futures patterns below,
+    # which would otherwise claim ``TXF2608`` via ^[A-Z]{2,4}\d{4}$. Only the
+    # unambiguous three-letter products match bare — TAIFEX ``TE``/``TF`` collide
+    # with CFFEX bond futures, so those require the explicit .TAIFEX suffix.
+    (re.compile(r"^(TXF|MXF|TMF)\d*$", re.I), "tw_futures"),
+    (re.compile(r"^[A-Z]{2,4}\d*\.TAIFEX$", re.I), "tw_futures"),
     (re.compile(r"^[A-Z]+-USDT$", re.I), "crypto"),
     (re.compile(r"^[A-Z]+/USDT$", re.I), "crypto"),
     # China futures: product+delivery.exchange (e.g. IF2406.CFFEX, rb2410.SHFE)

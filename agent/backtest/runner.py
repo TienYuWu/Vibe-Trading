@@ -533,6 +533,8 @@ _MARKET_TO_SOURCE = {
     "hk_equity": "yfinance",
     "india_equity": "yahoo",
     "kr_equity": "pykrx",
+    "tw_equity": "finmind",
+    "tw_futures": "finmind",
     "crypto": "okx",
     "futures": "tushare",
     "fund": "tushare",
@@ -1026,6 +1028,16 @@ def _create_market_engine(source: str, config: dict, codes: List[str]):
     if "kr_equity" in markets:
         from backtest.engines.korea_equity import KoreaEquityEngine
         return KoreaEquityEngine(config)
+
+    # Taiwan routing — same reason as India: the effective source is ``finmind``,
+    # which has no Wave-1 branch below. TAIFEX futures are checked first because
+    # their cost/margin model differs from cash equities.
+    if "tw_futures" in markets:
+        from backtest.engines.taiwan_futures import TaiwanFuturesEngine
+        return TaiwanFuturesEngine(config)
+    if "tw_equity" in markets:
+        from backtest.engines.taiwan_equity import TaiwanEquityEngine
+        return TaiwanEquityEngine(config)
 
     # Original routing (Wave 1)
     if source in ("okx", "ccxt"):
