@@ -38,6 +38,70 @@ TW_TAX = 0.003               # 證交稅, sell side only (當沖 = 0.0015)
 
 PRICE_LIMIT = 0.10
 
+# TWSE/TPEx 股票升降單位 (tick): (lower bound inclusive, tick). Every coarser
+# tick is a whole multiple of every finer one, so a price on a coarse grid is
+# already on the finer grids below it.
+STOCK_TICK_TABLE: tuple[tuple[float, float], ...] = (
+    (0.0, 0.01),
+    (10.0, 0.05),
+    (50.0, 0.10),
+    (100.0, 0.50),
+    (500.0, 1.00),
+    (1000.0, 5.00),
+)
+
+# 受益憑證 (ETF/ETN) run a separate, finer two-step table. Taiwan ETF codes are
+# the ones beginning ``00`` (0050, 006208, 00632R).
+ETF_TICK_TABLE: tuple[tuple[float, float], ...] = (
+    (0.0, 0.01),
+    (50.0, 0.05),
+)
+
+# Half the finest tick, so comparisons tolerate binary float error without ever
+# spanning a real price step.
+_PRICE_EPS = 0.005
+
+
+def _tick_table(symbol: str) -> tuple[tuple[float, float], ...]:
+    """Return the tick table that applies to *symbol*."""
+    code = symbol.split(".")[0] if "." in symbol else symbol
+    return ETF_TICK_TABLE if code.startswith("00") else STOCK_TICK_TABLE
+
+
+def twse_tick_size(symbol: str, price: float) -> float:
+    """Return the tick unit applicable to *symbol* at *price*.
+
+    Args:
+        symbol: TWSE/TPEx symbol; the ``00`` prefix selects the ETF table.
+        price: Price in NT$. Non-positive input returns the finest tick.
+
+    Returns:
+        The tick unit for the band containing *price*.
+    """
+    table = _tick_table(symbol)
+    tick = table[0][1]
+    for lower, unit in table:
+        if price >= lower - _PRICE_EPS:
+            tick = unit
+        else:
+            break
+    return tick
+
+
+def twse_round_down(symbol: str, price: float) -> float:
+    """Truncate *price* down onto *symbol*'s tick grid."""
+    tick = twse_tick_size(symbol, price)
+    return round(int((price + _PRICE_EPS * tick) / tick) * tick, 4)
+
+
+def twse_round_up(symbol: str, price: float) -> float:
+    """Round *price* up onto *symbol*'s tick grid, never below one tick."""
+    tick = twse_tick_size(symbol, price)
+    steps = int((price - _PRICE_EPS * tick) / tick)
+    if steps * tick < price - _PRICE_EPS * tick:
+        steps += 1
+    return round(max(steps, 1) * tick, 4)
+
 
 class TaiwanEquityEngine(BaseEngine):
     """TWSE / TPEx cash-equity engine.
@@ -117,6 +181,31 @@ class TaiwanEquityEngine(BaseEngine):
             commission += notional * self.tw_tax    # 證交稅: sell only
         return commission
 
+    def limit_band(self, symbol: str, bar: pd.Series, limit: float):
+        """The ±10% band, with both edges snapped inside the tick grid.
+
+        TWSE publishes 漲停價 / 跌停價 on the grid: the raw band price is moved
+        to the nearest tick *inside* the band, so the tradeable range never
+        widens. Without this the band edges are prices the exchange cannot
+        quote, and a fill can be judged against one.
+        """
+        band = super().limit_band(symbol, bar, limit)
+        if band is None:
+            return None
+        lower, upper = band
+        return twse_round_up(symbol, lower), twse_round_down(symbol, upper)
+
     def apply_slippage(self, price: float, direction: int) -> float:
-        """Slippage always works against the order."""
-        return price * (1 + direction * self.slippage_rate)
+        """Slippage against the order, then snapped onto the tick grid.
+
+        Rounding goes away from the trader — a buy pays the next tick up, a
+        sell receives the next tick down — so quantisation can never flatter
+        the result. ``direction`` 0 is a close, which BaseEngine books with the
+        opposite of the position direction before calling here, so every path
+        arrives with a real side.
+        """
+        slipped = price * (1 + direction * self.slippage_rate)
+        symbol = getattr(self, "_active_symbol", "") or ""
+        if direction > 0:
+            return twse_round_up(symbol, slipped)
+        return twse_round_down(symbol, slipped)

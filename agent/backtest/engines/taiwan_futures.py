@@ -69,8 +69,23 @@ DEFAULT_COMMISSION_PER_LOT = 20.0
 PRICE_LIMIT = 0.10
 
 # TAIFEX index futures are quoted in whole points, so rate-based slippage only
-# approximates a 1-tick fill. ~1 point at a 45,000 index level.
+# approximates a 1-tick fill. ~1 point at a 45,000 index level. The result is
+# snapped onto the product's tick grid (see ``_TICK``), which is what makes the
+# fill a price the exchange could actually have printed.
 DEFAULT_SLIPPAGE = 0.00002
+
+# TAIFEX 最小升降單位 (index points per product). The TAIEX-tracking contracts
+# quote in whole points; TE and TF track different indices on finer grids.
+_TICK: dict[str, float] = {
+    "TXF": 1.0,     # 臺股期貨 (大台)
+    "MXF": 1.0,     # 小型臺指期貨 (小台)
+    "TMF": 1.0,     # 微型臺指期貨 (微台)
+    "TE": 0.05,     # 電子期貨
+    "TF": 0.2,      # 金融期貨
+}
+
+# Finest tick is 0.05, so this tolerates float error without spanning a step.
+_PRICE_EPS = 1e-6
 
 # TAIEX level used only to turn an absolute NT$ margin into a plausible leverage
 # for position sizing. Known products post their exchange margin directly (see
@@ -216,8 +231,43 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
         return size * self.commission_per_lot + notional * self.futures_tax_rate
 
     def apply_slippage(self, price: float, direction: int) -> float:
-        """Slippage always works against the order."""
-        return price * (1 + direction * self.slippage_rate)
+        """Slippage against the order, then snapped onto the product's grid.
+
+        Rounding goes away from the trader — a buy pays the next tick up, a
+        sell receives the next tick down — so the quantisation can never
+        flatter the result. An unknown product keeps the raw price rather than
+        inventing a grid for it.
+        """
+        slipped = price * (1 + direction * self.slippage_rate)
+        tick = _TICK.get(_extract_product(getattr(self, "_active_symbol", "") or ""))
+        if tick is None:
+            return slipped
+        return self.snap_to_tick(slipped, tick, up=direction > 0)
+
+    @staticmethod
+    def snap_to_tick(price: float, tick: float, up: bool) -> float:
+        """Move *price* onto the *tick* grid, up or down, never below one tick."""
+        steps = (price + _PRICE_EPS) / tick if not up else (price - _PRICE_EPS) / tick
+        whole = int(steps)
+        if up and whole * tick < price - _PRICE_EPS:
+            whole += 1
+        return round(max(whole, 1) * tick, 4)
+
+    def limit_band(self, symbol: str, bar: pd.Series, limit: float):
+        """The ±10% band, with both edges snapped inside the tick grid.
+
+        TAIFEX quotes 漲停價 / 跌停價 on the grid, and the raw band price is
+        moved to the nearest tick *inside* the band so the tradeable range
+        never widens.
+        """
+        band = super().limit_band(symbol, bar, limit)
+        if band is None:
+            return None
+        lower, upper = band
+        tick = _TICK.get(_extract_product(symbol))
+        if tick is None:
+            return band
+        return self.snap_to_tick(lower, tick, up=True), self.snap_to_tick(upper, tick, up=False)
 
     # ── Contract mechanics ──
 

@@ -22,10 +22,16 @@ from backtest.engines._market_hooks import _detect_market
 from backtest.engines.taifex_margins import FALLBACK_INITIAL_MARGIN, parse_margin_rows
 
 _INITIAL_MARGIN = FALLBACK_INITIAL_MARGIN
-from backtest.engines.taiwan_equity import TaiwanEquityEngine
+from backtest.engines.taiwan_equity import (
+    TaiwanEquityEngine,
+    twse_round_down,
+    twse_round_up,
+    twse_tick_size,
+)
 from backtest.engines.taiwan_futures import (
     TaiwanFuturesEngine,
     _MULTIPLIER,
+    _TICK,
     _extract_product,
 )
 from backtest.loaders.finmind_loader import _resolve_dataset
@@ -240,6 +246,79 @@ class TestFuturesRules:
 # ---------------------------------------------------------------------------
 # Cash equity
 # ---------------------------------------------------------------------------
+
+
+class TestTickGrid:
+    """Fills and band edges must be prices the exchange could have printed."""
+
+    @pytest.mark.parametrize(
+        "price, tick",
+        [(9.99, 0.01), (10.0, 0.05), (49.95, 0.05), (50.0, 0.10),
+         (99.9, 0.10), (100.0, 0.50), (499.5, 0.50), (500.0, 1.00),
+         (999.0, 1.00), (1000.0, 5.00), (2500.0, 5.00)],
+    )
+    def test_stock_tick_bands(self, price: float, tick: float) -> None:
+        assert twse_tick_size("2330.TW", price) == tick
+
+    @pytest.mark.parametrize("price, tick", [(0.5, 0.01), (49.99, 0.01), (50.0, 0.05), (200.0, 0.05)])
+    def test_etf_uses_its_own_finer_table(self, price: float, tick: float) -> None:
+        """ETF codes (00xx) run a two-step table, not the stock one."""
+        assert twse_tick_size("0050.TW", price) == tick
+        assert twse_tick_size("00632R.TW", price) == tick
+
+    def test_rounding_directions(self) -> None:
+        assert twse_round_down("2330.TW", 601.4) == 601.0    # 500-1000 -> 1.0 tick
+        assert twse_round_up("2330.TW", 601.4) == 602.0
+        assert twse_round_down("2330.TW", 87.34) == 87.30    # 50-100 -> 0.1 tick
+        assert twse_round_up("2330.TW", 87.34) == 87.40
+
+    def test_equity_fill_is_snapped_away_from_the_trader(self) -> None:
+        eng = _equity_engine(slippage=0.001)
+        eng._active_symbol = "2330.TW"
+        buy = eng.apply_slippage(600.0, 1)     # 600.6 raw -> next tick up
+        sell = eng.apply_slippage(600.0, -1)   # 599.4 raw -> next tick down
+        assert buy == 601.0
+        assert sell == 599.0
+        assert buy > 600.0 > sell, "quantisation must never flatter the fill"
+
+    def test_equity_band_edges_land_on_the_grid_inside_the_band(self) -> None:
+        eng = _equity_engine()
+        bar = _make_bar(600.0, pre_close=600.0)
+        lower, upper = eng.limit_band("2330.TW", bar, 0.10)
+        assert (lower, upper) == (540.0, 660.0)
+        # 87.5 x 1.1 = 96.25, which is off the 0.1 grid: it truncates inward.
+        lower, upper = eng.limit_band("2330.TW", _make_bar(87.5, pre_close=87.5), 0.10)
+        assert upper == 96.2 and lower == 78.8
+        assert upper < 87.5 * 1.10 and lower > 87.5 * 0.90
+
+    @pytest.mark.parametrize(
+        "symbol, tick", [("TXF2608", 1.0), ("MXF2608", 1.0), ("TMF2608", 1.0),
+                         ("TE2608.TAIFEX", 0.05), ("TF2608.TAIFEX", 0.2)],
+    )
+    def test_futures_product_ticks(self, symbol: str, tick: float) -> None:
+        assert _TICK[_extract_product(symbol)] == tick
+
+    def test_futures_fill_is_snapped_away_from_the_trader(self) -> None:
+        eng = _futures_engine(slippage=0.001)
+        eng._active_symbol = "TXF2608"
+        assert eng.apply_slippage(20000.0, 1) == 20020.0    # whole points
+        assert eng.apply_slippage(20000.0, -1) == 19980.0
+
+    def test_futures_band_edges_land_on_the_grid(self) -> None:
+        eng = _futures_engine()
+        # 20005 x 1.1 = 22005.5 -> truncates to 22005 (inside the band).
+        lower, upper = eng.limit_band("TXF2608", _make_bar(20005.0, pre_close=20005.0), 0.10)
+        assert upper == 22005.0 and lower == 18005.0
+        assert upper < 20005.0 * 1.10 and lower > 20005.0 * 0.90
+
+    def test_unknown_product_keeps_the_raw_price(self) -> None:
+        """No invented grid for a contract whose tick we do not know."""
+        eng = _futures_engine(slippage=0.001)
+        eng._active_symbol = "ZZZ2608.TAIFEX"
+        assert eng.apply_slippage(20000.0, 1) == pytest.approx(20020.0)
+        assert eng.limit_band("ZZZ2608.TAIFEX", _make_bar(20005.0, pre_close=20005.0), 0.10) == (
+            pytest.approx(20005.0 * 0.9), pytest.approx(20005.0 * 1.1)
+        )
 
 
 class TestTaiwanEquity:
