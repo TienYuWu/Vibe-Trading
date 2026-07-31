@@ -7,8 +7,8 @@ allowed to trade at the locked open (an optimistic fill that could not have
 happened), and a name that opened freely but closed at the limit was refused a
 fill it would have got.
 
-Every engine with a daily band is covered here: A-share, India equity, China
-futures and global futures.
+Every engine with a daily band is covered here: A-share, India equity, Taiwan
+equity, China futures, global futures and TAIFEX futures.
 """
 
 from __future__ import annotations
@@ -20,24 +20,28 @@ from backtest.engines.china_a import ChinaAEngine
 from backtest.engines.china_futures import ChinaFuturesEngine
 from backtest.engines.global_futures import GlobalFuturesEngine
 from backtest.engines.india_equity import IndiaEquityEngine
+from backtest.engines.taiwan_equity import TaiwanEquityEngine
+from backtest.engines.taiwan_futures import TaiwanFuturesEngine
 from backtest.models import Position
 
 _BASE = 100.0
 
 
 def _equity_cases():
-    """(engine, symbol, band) for the two cash-equity engines."""
+    """(engine, symbol, band) for the cash-equity engines."""
     return [
         (ChinaAEngine({}), "000001.SZ", 0.10),
         (IndiaEquityEngine({}), "RELIANCE.NS", 0.20),
+        (TaiwanEquityEngine({}), "2330.TW", 0.10),
     ]
 
 
 def _futures_cases():
-    """(engine, symbol, band) for the two futures engines."""
+    """(engine, symbol, band) for the futures engines."""
     return [
         (ChinaFuturesEngine({}), "IF2406.CFFEX", 0.10),
         (GlobalFuturesEngine({}), "ESZ4", 0.07),
+        (TaiwanFuturesEngine({}), "TXF2608", 0.10),
     ]
 
 

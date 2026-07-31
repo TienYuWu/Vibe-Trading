@@ -25,7 +25,7 @@ from __future__ import annotations
 import pandas as pd
 
 from backtest.engines.base import BaseEngine
-from backtest.engines.china_a import _calc_pct_change
+from backtest.engines.china_a import _blocked_by_limit
 
 
 SHARES_PER_LOT = 1000
@@ -80,16 +80,20 @@ class TaiwanEquityEngine(BaseEngine):
 
         # 2. No same-bar sell restriction: 當日沖銷 is permitted.
 
-        # 3. Price limit ±10% (disabled when falsy).
-        if self.price_limit:
-            pct_chg = _calc_pct_change(bar)
-            if pct_chg is not None:
-                limit = float(self.price_limit)
-                if direction == 1 and pct_chg >= limit - 0.001:
-                    return False   # 漲停: cannot buy
-                if direction == 0 and pct_chg <= -limit + 0.001:
-                    return False   # 跌停: cannot sell
-        return True
+        # 3. Price limit ±10%, tested at execution time (see _blocked_by_limit):
+        #    the band comes off a base price known before the order (pre_close
+        #    or the prior close), compared against this bar's prospective fill.
+        if not self.price_limit:
+            return True
+        pos = self.positions.get(symbol) if direction == 0 else None
+        return not _blocked_by_limit(
+            self,
+            symbol,
+            direction,
+            bar,
+            float(self.price_limit),
+            position_direction=pos.direction if pos is not None else None,
+        )
 
     def round_size(self, raw_size: float, price: float) -> float:
         """Floor to whole board lots (1,000 shares unless ``lot_size`` overrides)."""

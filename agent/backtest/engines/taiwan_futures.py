@@ -31,6 +31,7 @@ import re
 
 import pandas as pd
 
+from backtest.engines.china_a import _blocked_by_limit
 from backtest.engines.futures_base import FuturesBaseEngine
 from backtest.engines.taifex_margins import get_initial_margins
 
@@ -129,6 +130,9 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
         config = {**config, "leverage": leverage}
         super().__init__(config)
 
+        # TAIFEX sets the daily band off the previous settlement price, not the
+        # previous close; close/pre_close is the fallback for OHLC-only loaders.
+        self.base_price_fields = ("pre_settle", "pre_close")
         self.slippage_rate: float = config.get("slippage", DEFAULT_SLIPPAGE)
         self.commission_per_lot: float = config.get(
             "commission_per_lot", DEFAULT_COMMISSION_PER_LOT
@@ -150,25 +154,22 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
         Returns:
             True if the trade is allowed.
         """
+        # Tested at execution time (see _blocked_by_limit): the band comes off
+        # the previous settlement — a price the market knew before the order —
+        # not this bar's own close, which can_execute cannot see.
         if not self.price_limit:
             return True
-        pct_chg = _calc_pct_change(bar)
-        if pct_chg is None:
+        pos = self.positions.get(symbol) if direction == 0 else None
+        if direction == 0 and pos is None:
             return True
-
-        limit = float(self.price_limit)
-        if direction == 1 and pct_chg >= limit - 0.001:
-            return False                      # limit-up: cannot open long
-        if direction == -1 and pct_chg <= -limit + 0.001:
-            return False                      # limit-down: cannot open short
-        if direction == 0:
-            pos = self.positions.get(symbol)
-            if pos is not None:
-                if pos.direction == 1 and pct_chg <= -limit + 0.001:
-                    return False              # cannot close long at limit-down
-                if pos.direction == -1 and pct_chg >= limit - 0.001:
-                    return False              # cannot close short at limit-up
-        return True
+        return not _blocked_by_limit(
+            self,
+            symbol,
+            direction,
+            bar,
+            float(self.price_limit),
+            position_direction=pos.direction if pos is not None else None,
+        )
 
     def round_size(self, raw_size: float, price: float) -> float:
         """Whole contracts only."""
@@ -266,23 +267,3 @@ class TaiwanFuturesEngine(FuturesBaseEngine):
 # ── Helpers ──
 
 
-# TAIFEX reports a daily settlement price, so settle/pre_settle is the
-# authoritative pair for the ±10% band (mirrors china_futures); close/pre_close
-# is the fallback when a loader only carries OHLC.
-def _calc_pct_change(bar: pd.Series):
-    """Bar change fraction. Priority: settle/pre_settle > close/pre_close > pct_chg."""
-    settle = bar.get("settle")
-    pre_settle = bar.get("pre_settle")
-    if settle is not None and pre_settle is not None and float(pre_settle) > 0:
-        return (float(settle) - float(pre_settle)) / float(pre_settle)
-
-    close = bar.get("close")
-    pre_close = bar.get("pre_close")
-    if close is not None and pre_close is not None and float(pre_close) > 0:
-        return (float(close) - float(pre_close)) / float(pre_close)
-
-    if "pct_chg" in bar.index:
-        val = bar["pct_chg"]
-        if pd.notna(val):
-            return float(val) / 100.0
-    return None
