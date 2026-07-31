@@ -59,6 +59,17 @@ class TestDetectMarket:
             # Korea equity (KRX)
             ("005930.KS", "kr_equity"),  # KOSPI
             ("247540.KQ", "kr_equity"),  # KOSDAQ
+            # Taiwan equity (TWSE / TPEx)
+            ("2330.TW", "tw_equity"),    # TWSE listed
+            ("6488.TWO", "tw_equity"),   # TPEx listed
+            ("0050.TW", "tw_equity"),    # ETF
+            ("00632R.TW", "tw_equity"),  # six-character leveraged ETF code
+            # TAIFEX futures — TXF2608 must not fall through to global futures,
+            # and CFFEX TF2406 must not be stolen by TAIFEX.
+            ("TXF2608", "tw_futures"),
+            ("MXF2608", "tw_futures"),
+            ("TE2608.TAIFEX", "tw_futures"),
+            ("TF2406.CFFEX", "futures"),
             # Crypto
             ("BTC-USDT", "crypto"),
             ("ETH-USDT", "crypto"),

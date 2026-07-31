@@ -22,7 +22,6 @@ does not yet expose.
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 import pandas as pd
@@ -58,7 +57,9 @@ class DataLoader:
     requires_auth = False   # token optional (raises the rate cap), not required
 
     def __init__(self) -> None:
-        self._token = os.getenv("FINMIND_TOKEN", "")
+        from src.config.accessor import get_env_config
+
+        self._token = get_env_config().data.finmind_token.strip()
 
     def is_available(self) -> bool:
         """FinMind serves anonymous traffic, so availability is a reachability check."""
