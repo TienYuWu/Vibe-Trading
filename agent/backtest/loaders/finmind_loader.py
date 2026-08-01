@@ -61,6 +61,16 @@ class DataLoader:
 
         self._token = get_env_config().data.finmind_token.strip()
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Authorization header carrying the token, empty when anonymous.
+
+        The token travels in a header rather than the query string on purpose.
+        ``requests`` puts the full request URL into every ``HTTPError`` it
+        raises, and those propagate into log lines and agent tool results — a
+        token in the query string is a token in the logs.
+        """
+        return {"Authorization": f"Bearer {self._token}"} if self._token else {}
+
     def is_available(self) -> bool:
         """FinMind serves anonymous traffic, so availability is a reachability check."""
         try:
@@ -71,8 +81,8 @@ class DataLoader:
                     "data_id": "2330",
                     "start_date": "2024-01-02",
                     "end_date": "2024-01-02",
-                    **({"token": self._token} if self._token else {}),
                 },
+                headers=self._auth_headers(),
                 timeout=10,
             )
             return resp.status_code == 200
@@ -145,10 +155,12 @@ class DataLoader:
             "start_date": start_date,
             "end_date": end_date,
         }
-        if self._token:
-            params["token"] = self._token
-
-        resp = requests.get(FINMIND_URL, params=params, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(
+            FINMIND_URL,
+            params=params,
+            headers=self._auth_headers(),
+            timeout=REQUEST_TIMEOUT,
+        )
         resp.raise_for_status()
         body = resp.json()
         if body.get("status") != 200:
