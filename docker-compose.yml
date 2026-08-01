@@ -81,6 +81,24 @@ services:
       vibe-trading:
         condition: service_started
 
+  # Test runner. Off by default (profile), so `docker compose up` is unchanged.
+  #   docker compose --profile test run --rm tests
+  #
+  # Only agent/tests is mounted, and that is a security boundary, not a
+  # convenience: .dockerignore keeps agent/tests/ out of the build context (the
+  # runtime image should not ship them) so the suite has to come from a mount,
+  # but mounting all of ./agent drags agent/.env in with it and hands the tests
+  # real credentials. The suite must pass with none. Everything else comes from
+  # the image, so source edits need `--build` to be picked up.
+  tests:
+    build:
+      context: .
+      target: test
+    volumes:
+      - ./agent/tests:/app/agent/tests
+    profiles:
+      - test
+
 volumes:
   vibe-runs:
   vibe-sessions:

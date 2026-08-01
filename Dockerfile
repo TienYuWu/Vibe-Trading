@@ -43,7 +43,39 @@ COPY agent/ agent/
 RUN pip install --no-cache-dir -e .
 
 # ============================================================================
-# Stage 3: Runtime — carries the prebuilt venv only, no compilers/dev headers.
+# Stage 3: Test — the builder's venv plus the dev extra (pytest, ruff, black).
+#
+# Declared BEFORE the runtime stage on purpose: the last stage in the file is
+# what a bare `docker build .` produces, and that must stay the runtime image.
+# Nothing here reaches runtime — a plain build never even evaluates this stage.
+#
+# .dockerignore keeps agent/tests/ out of the build context so the runtime
+# image never ships them, so the suite is bind-mounted in at run time:
+#
+#   docker build --target test -t vibe-trading-test .
+#   docker run --rm -v "$PWD/agent:/app/agent" vibe-trading-test
+#
+# or just `docker compose --profile test run --rm tests`, which wires the
+# same mount. The two e2e suites are excluded to match
+# .github/workflows/test.yml.
+# ============================================================================
+FROM builder AS test
+
+RUN pip install --no-cache-dir -e ".[dev]"
+
+# test_agent_guide_paths asserts that every path AGENT_CONTRIBUTOR_GUIDE.md
+# names still exists, including frontend/ and wiki/. This stage builds from
+# `builder`, which carries agent/ and nothing else by design, so the assertion
+# is about a full checkout rather than about the code. GitHub Actions runs it
+# where the whole repo exists; excluding it here keeps the container run honest
+# instead of green-by-accident.
+CMD ["pytest", "-q", "-p", "no:randomly", \
+     "--ignore=agent/tests/e2e_backtest", \
+     "--ignore=agent/tests/test_e2e_harness_v2.py", \
+     "--ignore=agent/tests/test_agent_guide_paths.py"]
+
+# ============================================================================
+# Stage 4: Runtime — carries the prebuilt venv only, no compilers/dev headers.
 # ============================================================================
 FROM python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3 AS runtime
 # python:3.11-slim digest resolved 2026-07-13
