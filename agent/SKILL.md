@@ -95,6 +95,42 @@ Example workflow:
 3. Use `write_file()` to create `config.json` and `code/signal_engine.py`
 4. Use `backtest()` to run and get metrics (Sharpe, return, drawdown, etc.)
 
+#### Protective stops (`config.json`, opt-in)
+
+A `signal_engine.py` emits target weights per bar, so an exit written there can
+only react to a **close**: "closed below the level, therefore flat from the next
+open". A protective order fills when price **touches** it — a within-bar event
+the target-weight contract cannot express. Put the exit in `config.json`
+instead and the engine tests it against each bar's own high/low:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `stop_rule` | `"none"` | `"chandelier"` enables the trailing stop |
+| `stop_atr_period` | `22` | Wilder ATR lookback |
+| `stop_atr_multiplier` | `3.0` | ATRs the stop trails behind the extreme |
+| `take_profit_pct` | `null` | Fixed target from entry, e.g. `0.15` = +15% |
+
+**Chandelier Exit** (Chuck LeBeau): for a long, the highest high reached since
+entry minus `multiplier` ATRs. It ratchets — the level only moves in the trade's
+favour, because a stop that can retreat from price is not protection.
+
+Modelling rules worth knowing before you read a result:
+- The level guarding a bar is fixed by the **previous** bar. A level derived
+  from the bar it guards would know the high it is meant to trail.
+- A bar that **opens through** the level fills at the open, not the level — the
+  gap is the price the market actually offered.
+- Market rules still veto the fill. A TWSE name locked limit-down has no
+  counterparty, so the stop does not fill that day and the position carries.
+- A position **cannot stop out on its entry bar**: no ATR and no extreme exist
+  for it yet, and inventing one would put the stop at a price the rule never
+  produced.
+- When a bar spans both the stop and the target, OHLC cannot say which came
+  first, so the **stop** is assumed — the assumption that cannot flatter the
+  result.
+
+Stops are opt-in: omit `stop_rule` and an existing config re-runs bit-identically.
+Exits are tagged `stop_chandelier` / `take_profit` in `artifacts/trades.csv`.
+
 ### Multi-Agent Swarm Teams
 30 pre-built agent teams for complex research:
 - **Investment Committee**: bull/bear debate → risk review → PM decision

@@ -51,6 +51,7 @@ def _json_safe_scalar_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(v, dict)
     }
 from backtest.models import EquitySnapshot, Position, TradeRecord
+from backtest.stops import ChandelierStop, StopConfig, trigger_price, wilder_atr
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +394,11 @@ class BaseEngine(ABC):
         self.equity_snapshots: List[EquitySnapshot] = []
         self._bar_idx: int = 0
         self._active_symbol: str = ""  # set by _rebalance/_close_position for subclass use
+        #: Protective stops. Opt-in: ``stop_rule`` defaults to ``"none"`` so a
+        #: re-run of an existing config is bit-identical.
+        self.stop_config: StopConfig = StopConfig.from_config(config)
+        self._stops: Dict[str, ChandelierStop] = {}
+        self._atr_cache: Dict[str, pd.Series] = {}
 
     # ── Market rule interface (subclass must implement) ──
 
@@ -924,6 +930,18 @@ class BaseEngine(ABC):
             for order in planned:
                 self._execute_open_order(order, ts)
 
+            # c2. Protective stops fire inside the bar, after the open orders
+            # are on the books (a position opened at this open can gap out on
+            # the same bar) and before the post-fill hooks, which value the book
+            # at a close a stopped-out position no longer holds. A stop is a
+            # market fill, so it also precedes liquidation: a position the stop
+            # already took out cannot then be liquidated.
+            if self.stop_config.enabled:
+                for c in codes:
+                    frame = data_map.get(c)
+                    if frame is not None and ts in frame.index:
+                        self._apply_stops(c, frame, ts)
+
             # d. Apply post-execution hooks after all normal market fills.
             if not stop_run:
                 stop_run = self.after_rebalance_bar(ts, data_map, codes)
@@ -1179,6 +1197,104 @@ class BaseEngine(ABC):
             entry_commission=order.commission,
         )
 
+    def _apply_stops(self, symbol: str, df: pd.DataFrame, ts: pd.Timestamp) -> None:
+        """Fire protective stops for *symbol* inside this bar, then re-arm.
+
+        Order matters and is the whole correctness story: the level tested
+        against this bar was fixed by the PREVIOUS bar, and the level for the
+        next bar is folded in only after the test. A level derived from the
+        bar it guards would be lookahead — it would know the high it is
+        supposed to trail.
+
+        A position opened on this bar has no level yet and so cannot stop out
+        on its entry bar. That is deliberate: a Chandelier level needs an ATR
+        and an extreme, and inventing one from the entry bar alone would put
+        the stop at a price the rule never actually produced.
+
+        Args:
+            symbol: Symbol to check.
+            df: The symbol's full OHLC frame.
+            ts: Current bar timestamp.
+        """
+        pos = self.positions.get(symbol)
+        if pos is None:
+            self._stops.pop(symbol, None)
+            return
+
+        bar = df.loc[ts]
+        bar_open = float(bar.get("open", bar.get("close", 0.0)) or 0.0)
+        bar_high = float(bar.get("high", bar_open) or bar_open)
+        bar_low = float(bar.get("low", bar_open) or bar_open)
+        if bar_open <= 0 and not self.allow_nonpositive_prices:
+            return
+
+        state = self._stops.get(symbol)
+        hit = self._stop_hit(pos, state, bar_open, bar_high, bar_low)
+        if hit is not None:
+            reason, raw_price = hit
+            # Market rules still apply: a name locked at the limit has no
+            # counterparty, so the stop simply does not get filled this bar.
+            if self.can_execute(symbol, 0, bar):
+                self._active_symbol = symbol
+                price = self.apply_slippage(raw_price, -pos.direction)
+                self._close_position(symbol, price, ts, reason)
+                self._stops.pop(symbol, None)
+                return
+
+        if self.stop_config.rule == "chandelier":
+            if state is None:
+                state = ChandelierStop(
+                    direction=pos.direction,
+                    multiplier=self.stop_config.multiplier,
+                )
+                self._stops[symbol] = state
+            state.update(bar_high, bar_low, self._atr_at(symbol, df, ts))
+
+    def _stop_hit(
+        self,
+        pos: Position,
+        state: Optional[ChandelierStop],
+        bar_open: float,
+        bar_high: float,
+        bar_low: float,
+    ) -> Optional[tuple[str, float]]:
+        """Return ``(reason, fill_price)`` when a resting order triggers.
+
+        The stop is tested before the target. When a bar spans both levels the
+        OHLC record cannot say which came first, so the adverse one is assumed
+        — the assumption that cannot flatter the result.
+        """
+        if state is not None and state.level is not None:
+            fill = trigger_price(
+                pos.direction, state.level, bar_open, bar_high, bar_low
+            )
+            if fill is not None:
+                return "stop_chandelier", fill
+
+        take_profit = self.stop_config.take_profit_pct
+        if take_profit is not None and pos.entry_price > 0:
+            target = pos.entry_price * (1.0 + pos.direction * take_profit)
+            fill = trigger_price(
+                pos.direction, target, bar_open, bar_high, bar_low, is_target=True
+            )
+            if fill is not None:
+                return "take_profit", fill
+        return None
+
+    def _atr_at(self, symbol: str, df: pd.DataFrame, ts: pd.Timestamp) -> float:
+        """ATR for *symbol* at *ts*, computing the whole series once per symbol."""
+        series = self._atr_cache.get(symbol)
+        if series is None:
+            if not {"high", "low", "close"}.issubset(df.columns):
+                series = pd.Series(float("nan"), index=df.index)
+            else:
+                series = wilder_atr(df, self.stop_config.atr_period)
+            self._atr_cache[symbol] = series
+        try:
+            return float(series.loc[ts])
+        except (KeyError, TypeError, ValueError):
+            return float("nan")
+
     def _close_position(
         self,
         symbol: str,
@@ -1189,6 +1305,9 @@ class BaseEngine(ABC):
         """Close position, record trade, return capital."""
         self._active_symbol = symbol
         pos = self.positions.pop(symbol, None)
+        # Drop any armed stop with the position: a later re-entry must trail
+        # from its own entry, not inherit the previous trade's ratchet.
+        self._stops.pop(symbol, None)
         if pos is None:
             return
 

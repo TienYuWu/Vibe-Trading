@@ -35,6 +35,7 @@ from backtest.loaders.registry import (
     resolve_loader,
 )
 from backtest.loaders.base import NoAvailableSourceError, validate_ohlc
+from backtest.stops import VALID_STOP_RULES
 # Symbol classification lives in ``_market_hooks`` so runner.py and
 # composite.py share a single source of truth (audit-2026-05-18 B1+C1+C2).
 # ``_detect_market`` is also re-exported here for back-compat with
@@ -82,6 +83,21 @@ class BacktestConfigSchema(BaseModel):
     initial_cash: float = Field(default=1_000_000, gt=0, allow_inf_nan=False)
     fundamental_fields: Optional[Dict[str, List[str]]] = None
     event_feeds: Optional[List[Dict[str, Any]]] = None
+    # Protective stops (backtest.stops). Declared here so a typo is refused at
+    # the config boundary with a readable message rather than deep inside
+    # engine construction. Defaults keep stops off, so a config that omits
+    # them re-runs bit-identically.
+    stop_rule: str = "none"
+    stop_atr_period: int = Field(default=22, ge=1)
+    stop_atr_multiplier: float = Field(default=3.0, gt=0, allow_inf_nan=False)
+    take_profit_pct: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @field_validator("stop_rule")
+    @classmethod
+    def valid_stop_rule(cls, v: str) -> str:
+        if v not in VALID_STOP_RULES:
+            raise ValueError(f"stop_rule must be one of {VALID_STOP_RULES}, got {v!r}")
+        return v
 
     @field_validator("codes")
     @classmethod
