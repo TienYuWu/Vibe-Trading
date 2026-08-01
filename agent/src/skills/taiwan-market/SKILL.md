@@ -136,10 +136,24 @@ REST `/alpha/list` filter, and factor computation on Taiwan panels all work.
 Coverage is inherited from `equity_us` at the registry level, because FinMind
 serves raw price and share volume with no Tushare 千元/手 scaling.
 
-There is **no TWSE benchmark panel**, so `alpha bench --universe equity_tw` is
-not offered — it would fail at universe load rather than produce a Taiwanese
-benchmark. Evaluate a single factor by writing it into a `signal_engine.py` and
-running a normal backtest.
+Batch factor evaluation runs on the **`twse50`** bench universe — the Taiwan 50
+(臺灣50, tracked by `0050.TW`) fetched through FinMind:
+
+```bash
+vibe-trading alpha bench --zoo alpha101 --universe twse50 --period 2023-2024
+```
+
+Two caveats the bench summary also reports in its `meta` block:
+
+- **Survivorship bias, and worse than sp500's.** The constituent list is a
+  single hand-maintained snapshot — FinMind publishes no index-membership
+  dataset to build a point-in-time list from — so names that left the index
+  during the period are absent and IC is biased upward. Read a `twse50` IC as a
+  *relative ranking between alphas*, not as an attainable edge.
+- **~19 alphas per zoo skip**, on every equity universe, not just this one:
+  they are sector-neutral and need an industry classification no panel carries.
+
+Daily bars only, since that is all FinMind's free tier serves.
 
 ## Signal Convention
 

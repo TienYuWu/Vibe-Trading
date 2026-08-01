@@ -67,6 +67,7 @@ _PERIOD_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})/(\d{4}-\d{2}-\d{2})$")
 _UNIVERSE_TAG = {
     "csi300": "equity_cn",
     "sp500": "equity_us",
+    "twse50": "equity_tw",
     "btc-usdt": "crypto",
 }
 
@@ -130,6 +131,8 @@ def _load_universe_panel(
         panel = _load_csi300_panel(start, end)
     elif universe == "sp500":
         panel = _load_sp500_panel(start, end)
+    elif universe == "twse50":
+        panel = _load_twse50_panel(start, end)
     elif universe == "btc-usdt":
         panel = _load_btc_panel(start, end)
     else:  # pragma: no cover — guarded above
@@ -490,6 +493,72 @@ def _load_btc_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
     panel = _wide_from_fetched(fetched, include_amount=False)
     if all(k in panel for k in ("open", "high", "low", "close")):
         panel["vwap"] = (panel["open"] + panel["high"] + panel["low"] + panel["close"]) / 4.0
+    return panel
+
+
+# FTSE TWSE Taiwan 50 (臺灣50, tracked by 0050.TW) constituents. Hand-maintained:
+# FinMind exposes no index-membership dataset, and the TWSE/FTSE published lists
+# are not machine-readable without an extra dependency. Bump the date below
+# whenever this list is refreshed against the official quarterly review.
+_TWSE50_CONSTITUENT_SOURCE_DATE = "2026-08-01"
+
+_TWSE50_CODES = [
+    "2330", "2317", "2454", "2308", "2382", "2881", "2882", "2412", "2891",
+    "3711", "2886", "2884", "1216", "2303", "2885", "2892", "5880", "2357",
+    "3231", "2890", "2887", "3034", "2379", "2345", "2603", "1303", "1301",
+    "2002", "3008", "2207", "2801", "2883", "4938", "2409", "6505", "1326",
+    "2327", "2395", "3037", "2408", "5871", "9910", "2912", "1101", "2105",
+    "6415", "4904", "3045", "2618", "2610",
+]
+
+
+def _load_twse50_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
+    """Taiwan 50 panel via FinMind. Adds vwap = (O+H+L+C)/4 for alpha101.
+
+    Survivorship-bias warning, and a stronger one than sp500 carries: the code
+    list is a single hand-maintained snapshot rather than even a scraped
+    *current* membership, so names that left the index during ``start..end``
+    are absent and IC stats are biased upward. FinMind publishes no index
+    membership dataset to derive a point-in-time list from. The bench summary
+    surfaces this through the ``_meta`` key below — read a twse50 IC as a
+    relative ranking between alphas, not as an attainable edge.
+
+    FinMind serves daily bars only, so this universe is daily-only by
+    construction.
+    """
+    codes = list(_TWSE50_CODES)
+    logger.warning(
+        "twse50 universe uses a hand-maintained constituent list (@ %s) "
+        "→ survivorship-biased",
+        _TWSE50_CONSTITUENT_SOURCE_DATE,
+    )
+
+    # The finmind loader takes project-style symbols (``2330.TW``).
+    project_codes = [f"{c}.TW" for c in codes]
+    from backtest.loaders.registry import resolve_loader
+
+    loader = resolve_loader("tw_equity")
+    fetched = _retry(lambda: loader.fetch(project_codes, start, end)) or {}
+
+    # FinMind's equity table carries NT$ turnover, so amount is real rather than
+    # absent. No bundled alpha requires it today — the zoos derive adv from
+    # volume — so this unlocks nothing on its own; it is here for hand-written
+    # factors. The value is raw currency with no Tushare-style 千元 scaling,
+    # which is why vwap still uses the typical price like equity_us, and why
+    # equity_tw can inherit equity_us alpha coverage at the registry level.
+    panel = _wide_from_fetched(fetched, include_amount=True)
+    if all(k in panel for k in ("open", "high", "low", "close")):
+        panel["vwap"] = (panel["open"] + panel["high"] + panel["low"] + panel["close"]) / 4.0
+
+    panel["_meta"] = {
+        "universe": "twse50",
+        "survivorship_bias": True,
+        "degraded": False,
+        "constituent_source": "hand-maintained list",
+        "constituent_source_date": _TWSE50_CONSTITUENT_SOURCE_DATE,
+        "constituent_count": len(codes),
+        "fetched_count": len(fetched),
+    }
     return panel
 
 

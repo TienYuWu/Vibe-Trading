@@ -450,6 +450,80 @@ class TestFinMindLoader:
         with pytest.raises(ValueError, match="daily"):
             DataLoader().fetch(["2330"], "2026-01-01", "2026-01-31", interval="5m")
 
+    def test_equity_rows_keep_nt_turnover(self) -> None:
+        """``Trading_money`` becomes ``amount`` — raw NT$, no 千元 scaling."""
+        from backtest.loaders.finmind_loader import _normalize_equity
+
+        frame = _normalize_equity([
+            {"date": "2024-01-02", "open": 590.0, "max": 593.0, "min": 589.0,
+             "close": 593.0, "Trading_Volume": 27997826, "Trading_money": 16549619798},
+        ])
+        assert frame["amount"].iloc[0] == 16549619798
+        assert frame["volume"].iloc[0] == 27997826
+
+    def test_derivative_rows_carry_the_previous_settlement(self) -> None:
+        """TAIFEX bands come off the prior settlement, so the loader supplies it.
+
+        Without ``pre_settle`` the engine's price-limit check silently falls
+        back to the previous close, which is not the rule the exchange applies.
+        """
+        from backtest.loaders.finmind_loader import _normalize_derivative
+
+        frame = _normalize_derivative([
+            {"date": "2024-01-02", "open": 17838.0, "max": 17920.0, "min": 17751.0,
+             "close": 17798.0, "volume": 82827, "settlement_price": 17800.0},
+            {"date": "2024-01-03", "open": 17658.0, "max": 17667.0, "min": 17507.0,
+             "close": 17546.0, "volume": 97851, "settlement_price": 17545.0},
+        ])
+        assert pd.isna(frame["pre_settle"].iloc[0])   # nothing precedes bar 1
+        assert frame["pre_settle"].iloc[1] == 17800.0
+        assert frame["settle"].iloc[1] == 17545.0
+
+    def test_zero_settlement_never_becomes_a_base_price(self) -> None:
+        """TAIFEX publishes 0 settlements on thin days; a 0 band base is absurd."""
+        from backtest.loaders.finmind_loader import _normalize_derivative
+
+        frame = _normalize_derivative([
+            {"date": "2024-01-02", "open": 100.0, "max": 101.0, "min": 99.0,
+             "close": 100.0, "volume": 10, "settlement_price": 0.0},
+            {"date": "2024-01-03", "open": 100.0, "max": 101.0, "min": 99.0,
+             "close": 100.0, "volume": 10, "settlement_price": 101.0},
+        ])
+        assert pd.isna(frame["pre_settle"].iloc[1])
+
+
+class TestTwse50BenchUniverse:
+    def test_registered_as_a_bench_universe(self) -> None:
+        from src.tools.alpha_bench_tool import _UNIVERSE_TAG
+
+        assert _UNIVERSE_TAG["twse50"] == "equity_tw"
+
+    def test_cli_and_rest_offer_it(self) -> None:
+        """A universe with a panel must be reachable from both surfaces."""
+        from src.api.alpha_routes import _BENCH_UNIVERSES
+        from src.factors.cli_handlers import _UNIVERSE_CHOICES, _LIST_UNIVERSE_ALIASES
+
+        assert "twse50" in _BENCH_UNIVERSES
+        assert "twse50" in _UNIVERSE_CHOICES
+        assert _LIST_UNIVERSE_ALIASES["twse50"] == "equity_tw"
+
+    def test_constituents_are_unique_and_full_size(self) -> None:
+        from src.tools.alpha_bench_tool import _TWSE50_CODES
+
+        assert len(_TWSE50_CODES) == 50
+        assert len(set(_TWSE50_CODES)) == 50
+        assert all(c.isdigit() and len(c) == 4 for c in _TWSE50_CODES)
+
+    def test_every_bench_universe_has_a_loader_branch(self) -> None:
+        """_UNIVERSE_TAG and the dispatch in _load_universe_panel must agree."""
+        import inspect
+
+        from src.tools import alpha_bench_tool
+
+        source = inspect.getsource(alpha_bench_tool._load_universe_panel)
+        for name in alpha_bench_tool._UNIVERSE_TAG:
+            assert f'"{name}"' in source, f"{name} has no branch in _load_universe_panel"
+
 
 # ---------------------------------------------------------------------------
 # Multiplier / margin tables stay in sync

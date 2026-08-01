@@ -152,9 +152,16 @@ One-line cross-sectional IC / IR / alive-reversed-dead categorisation across fiv
 - **academic** (12 factors) — Fama-French 5 + Carhart momentum + Jegadeesh reversal + George-Hwang 52-week-high + Amihud illiquidity + Harvey-Siddique skew + Frazzini-Pedersen betting-against-beta (price-based proxies) + a correlation-rewiring stability score (from the in-repo correlation-regime skill).
 - **fundamental** (4 factors) — PIT-safe earnings yield, ROE, gross profitability, and asset growth from daily fundamental panels.
 
+Bench universes (each has a panel loader): `csi300` (equity_cn), `sp500`
+(equity_us), `twse50` (equity_tw, Taiwan 50 via FinMind), `btc-usdt` (crypto).
+All three equity panels carry a survivorship-bias flag in the bench summary's
+`meta` block — constituent lists are current, not point-in-time, so IC is
+biased upward. The ~19 sector-neutral alphas in each zoo skip on every equity
+universe: they need an industry classification no panel supplies.
+
 Each alpha ships with `__alpha_meta__` (formula LaTeX + theme + universe + warmup + columns required), guarded by an AST purity gate + 300-row lookahead sentinel test. Use the `vibe-trading alpha {list,show,bench,compare,export-manifest}` CLI, the `/alpha/*` REST routes (browser at `/alpha-zoo`), or compose multi-factor signals via `ZooSignalEngine.from_zoo(...)`.
 
-### Finance Skills (88)
+### Finance Skills (89)
 Comprehensive knowledge base covering:
 - Technical analysis (candlestick, Elliott wave, Ichimoku, SMC, harmonic, chanlun)
 - Quantitative methods (factor research, ML strategy, pair trading, multi-factor)

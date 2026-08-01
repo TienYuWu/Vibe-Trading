@@ -47,6 +47,16 @@ _OPTION_DATA_ID: dict[str, str] = {"TXO": "TXO"}
 
 _OHLCV = ["open", "high", "low", "close", "volume"]
 
+# Optional columns, emitted only when the dataset carries them.
+#   amount     — NT$ turnover (equities). Alphas that need adv/turnover skip the
+#                symbol entirely without it.
+#   settle     — daily settlement (futures). TAIFEX sets the ±10% band off the
+#                PREVIOUS settlement, so ``pre_settle`` is what the engine's
+#                price-limit check wants; without it the band silently falls
+#                back to the previous close.
+_EQUITY_EXTRA = ["amount"]
+_FUTURES_EXTRA = ["settle", "pre_settle"]
+
 
 @register
 class DataLoader:
@@ -145,7 +155,9 @@ class DataLoader:
         )
         if frame.empty:
             return None
-        frame = frame[_OHLCV].dropna(subset=["open", "high", "low", "close"])
+        extra = _FUTURES_EXTRA if is_derivative else _EQUITY_EXTRA
+        keep = _OHLCV + [c for c in extra if c in frame.columns]
+        frame = frame[keep].dropna(subset=["open", "high", "low", "close"])
         return validate_ohlc(frame)
 
     def _request(self, dataset: str, data_id: str, start_date: str, end_date: str) -> list[dict]:
@@ -193,10 +205,13 @@ def _normalize_equity(rows: list[dict]) -> pd.DataFrame:
             "max": "high",
             "min": "low",
             "Trading_Volume": "volume",
+            # NT$ turnover, raw currency — no Tushare-style 千元 scaling, which
+            # is why equity_tw shares the equity_us vwap treatment.
+            "Trading_money": "amount",
         }
     )
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-    for col in _OHLCV:
+    for col in _OHLCV + _EQUITY_EXTRA:
         if col not in frame.columns:
             frame[col] = pd.NA
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
@@ -206,9 +221,16 @@ def _normalize_equity(rows: list[dict]) -> pd.DataFrame:
 def _normalize_derivative(rows: list[dict]) -> pd.DataFrame:
     """Collapse multi-contract rows to the most-traded contract per date."""
     frame = pd.DataFrame(rows)
-    frame = frame.rename(columns={"date": "trade_date", "max": "high", "min": "low"})
+    frame = frame.rename(
+        columns={
+            "date": "trade_date",
+            "max": "high",
+            "min": "low",
+            "settlement_price": "settle",
+        }
+    )
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-    for col in _OHLCV:
+    for col in _OHLCV + ["settle"]:
         if col not in frame.columns:
             frame[col] = pd.NA
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
@@ -221,6 +243,14 @@ def _normalize_derivative(rows: list[dict]) -> pd.DataFrame:
     frame["volume"] = frame["volume"].fillna(0)
     # Highest volume wins per date; stable sort keeps the first on ties.
     frame = frame.sort_values(["trade_date", "volume"], ascending=[True, False])
-    return frame.drop_duplicates(subset="trade_date", keep="first").set_index(
+    frame = frame.drop_duplicates(subset="trade_date", keep="first").set_index(
         "trade_date"
     ).sort_index()
+
+    # TAIFEX sets the daily band off the PREVIOUS settlement, so the engine
+    # needs it as its own column. Derived here rather than in the engine because
+    # only the loader knows the contract's own calendar; a zero/blank settlement
+    # (the exchange publishes those on thin days) must not become a base price.
+    settle = frame["settle"].where(frame["settle"] > 0)
+    frame["pre_settle"] = settle.shift(1)
+    return frame
