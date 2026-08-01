@@ -35,6 +35,15 @@ _SOURCE_PATTERNS = [
     # Korea: KOSPI (005930.KS) / KOSDAQ (247540.KQ), 6-digit codes. Served by
     # pykrx (KRX public data, no auth); registry falls back to Yahoo/yfinance.
     (re.compile(r"^\d{6}\.(KS|KQ)$", re.I), "pykrx"),
+    # Taiwan: TWSE (2330.TW) / TPEx (6488.TWO) cash equities and TAIFEX index
+    # futures. Served by finmind (public HTTP, token optional); the registry
+    # falls back to Yahoo/yfinance for cash equities only — Yahoo carries no
+    # TAIFEX derivatives at all. Bare TAIFEX product codes previously matched
+    # nothing here and fell through to the ``tushare`` default. ``TE``/``TF``
+    # need the explicit suffix so they cannot be confused with other products.
+    (re.compile(r"^[0-9][0-9A-Z]{3,5}\.(TW|TWO)$", re.I), "finmind"),
+    (re.compile(r"^(TXF|MXF|TMF)\d*$", re.I), "finmind"),
+    (re.compile(r"^[A-Z]{2,4}\d*\.TAIFEX$", re.I), "finmind"),
     (re.compile(r"^[A-Z]+-USDT$", re.I), "okx"),
     (re.compile(r"^[A-Z]+/USDT$", re.I), "ccxt"),
     # Forex pairs and metals (EUR/USD, XAU/USD, EURUSD.FX). mt5 is the head of

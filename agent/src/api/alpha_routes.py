@@ -107,7 +107,7 @@ _VALID_THEMES = {
     "liquidity", "microstructure", "sentiment", "growth", "leverage",
 }
 _VALID_UNIVERSES = {
-    "equity_us", "equity_cn", "equity_hk", "equity_in", "equity_kr",
+    "equity_us", "equity_cn", "equity_hk", "equity_in", "equity_kr", "equity_tw",
     "crypto", "futures",
 }
 # Ranking metrics for /alpha/compare — keep in sync with

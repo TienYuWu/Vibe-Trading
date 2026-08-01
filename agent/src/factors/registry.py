@@ -63,7 +63,43 @@ _PRICE_COLS = {"open", "high", "low", "close", "volume", "vwap", "amount"}
 
 PanelColumn = str
 
-Universe = Literal["equity_us", "equity_cn", "equity_hk", "equity_in", "equity_kr", "crypto", "futures"]
+Universe = Literal[
+    "equity_us", "equity_cn", "equity_hk", "equity_in", "equity_kr", "equity_tw",
+    "crypto", "futures",
+]
+
+# Registry-level market inheritance. A cash-equity market whose panel is
+# shape-compatible with one already covered adds itself here instead of being
+# written into every zoo module's ``universe`` metadata — the 255-edit sweep
+# each new market used to cost, which the Korea merge asked to be the last of.
+#
+# Key inherits the coverage of value: an alpha that declares the proxy is
+# treated as covering the key too. ``equity_us`` is the right proxy for any
+# market carrying raw price/volume bars with no Tushare 千元/手 scaling, which
+# is what ``base.vwap`` keys its market-specific formulas on. A market needing
+# a different vwap or column contract must NOT inherit — it declares itself in
+# metadata like ``equity_cn`` does.
+_UNIVERSE_INHERITS: dict[str, str] = {
+    # FinMind serves TWSE/TPEx bars as raw price and share volume.
+    "equity_tw": "equity_us",
+}
+
+
+def universe_covers(declared: list[str], universe: str) -> bool:
+    """Whether alphas declaring *declared* cover *universe*.
+
+    Args:
+        declared: The alpha's ``universe`` metadata list.
+        universe: The universe being filtered on.
+
+    Returns:
+        True on a direct declaration, or when *universe* inherits from a
+        universe the alpha declares (see ``_UNIVERSE_INHERITS``).
+    """
+    if universe in declared:
+        return True
+    proxy = _UNIVERSE_INHERITS.get(universe)
+    return proxy is not None and proxy in declared
 
 
 def validate_columns_required(cols: list[str]) -> None:
@@ -274,7 +310,7 @@ class Registry:
                 continue
             if theme is not None and theme not in a.meta.get("theme", []):
                 continue
-            if universe is not None and universe not in a.meta.get("universe", []):
+            if universe is not None and not universe_covers(a.meta.get("universe", []), universe):
                 continue
             out.append(a.id)
         return sorted(out)

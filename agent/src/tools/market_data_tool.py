@@ -56,6 +56,7 @@ class MarketDataTool(BaseTool):
                     "fmp",
                     "mt5",
                     "pykrx",
+                    "finmind",
                 ],
                 "description": (
                     "Data source. 'auto' detects from symbol format with fallback. "
@@ -65,7 +66,11 @@ class MarketDataTool(BaseTool):
                     "(crypto), baostock/tencent/eastmoney/sina/akshare/mootdx "
                     "(China A-shares), stooq (global EOD), pykrx (Korea KRX daily "
                     "bars for <CODE>.KS / <CODE>.KQ; needs the optional pykrx "
-                    "package, else Korea falls back to yahoo/yfinance). Key-gated "
+                    "package, else Korea falls back to yahoo/yfinance), finmind "
+                    "(Taiwan daily bars: TWSE/TPEx <CODE>.TW / <CODE>.TWO and "
+                    "TAIFEX index futures such as TXF2608; no package needed, "
+                    "FINMIND_TOKEN optional and only raises the request cap — "
+                    "Yahoo covers the cash equities but no TAIFEX). Key-gated "
                     "REST: tushare (China A-shares), finnhub/alphavantage/tiingo/fmp "
                     "(US/global). mt5: forex/metals from a local MetaTrader 5 "
                     "terminal (Windows; e.g. EUR/USD, XAUUSD.FX)."

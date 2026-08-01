@@ -75,9 +75,9 @@ from src.factors.registry import Registry, RegistryError
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Benchmarkable data universes: every name here must have a panel loader in
-# ``src.tools.alpha_bench_tool._UNIVERSE_TAG``. There is no KRX (or NSE/BSE)
-# panel yet, so Korea/India are deliberately absent — ``alpha bench`` would
-# fail at universe load, not produce a Korean benchmark.
+# ``src.tools.alpha_bench_tool._UNIVERSE_TAG``. There is no KRX, NSE/BSE or
+# TWSE panel yet, so Korea/India/Taiwan are deliberately absent — ``alpha
+# bench`` would fail at universe load, not produce a Taiwanese benchmark.
 _UNIVERSE_CHOICES = ["csi300", "sp500", "btc-usdt"]
 
 # Factor-metadata universes accepted by ``alpha list --universe`` — these are
@@ -86,7 +86,7 @@ _UNIVERSE_CHOICES = ["csi300", "sp500", "btc-usdt"]
 # ``src.factors.registry.Universe`` and the REST allowlist in
 # ``src.api.alpha_routes._VALID_UNIVERSES``.
 _LIST_UNIVERSE_CHOICES = [
-    "equity_us", "equity_cn", "equity_hk", "equity_in", "equity_kr",
+    "equity_us", "equity_cn", "equity_hk", "equity_in", "equity_kr", "equity_tw",
     "crypto", "futures",
 ]
 # Benchmark universe -> the metadata universe its panel represents, so

@@ -32,6 +32,7 @@ class Market(str, Enum):
     EQUITY_HK = "equity_hk"
     EQUITY_IN = "equity_in"
     EQUITY_KR = "equity_kr"
+    EQUITY_TW = "equity_tw"
     CRYPTO = "crypto"
     FUTURES = "futures"
 
@@ -329,10 +330,12 @@ def vwap(panel: dict[str, pd.DataFrame], market: Market | str) -> pd.DataFrame:
       ``volume * 100`` (shares); ``+1`` keeps the denominator positive on
       suspended bars.
     - ``equity_us`` / ``equity_hk`` / ``equity_in`` / ``equity_kr`` /
-      ``futures``: typical price ``(H + L + C + O) / 4`` when ``panel["vwap"]``
-      is absent. India (NSE/BSE) bars from Yahoo and Korea (KRX) bars from
-      pykrx carry raw price/volume (no Tushare 千元/手 scaling), so the
-      typical-price form applies unchanged.
+      ``equity_tw`` / ``futures``: typical price ``(H + L + C + O) / 4`` when
+      ``panel["vwap"]`` is absent. India (NSE/BSE) bars from Yahoo, Korea (KRX)
+      bars from pykrx and Taiwan (TWSE/TPEx) bars from FinMind carry raw
+      price/volume (no Tushare 千元/手 scaling), so the typical-price form
+      applies unchanged. This shared shape is what lets ``equity_tw`` inherit
+      alpha coverage from ``equity_us`` (see ``registry._UNIVERSE_INHERITS``).
     - ``crypto``: prefer ``panel["vwap"]`` if provided, else typical price.
 
     Any missing required column → NaN propagation; never silent zero.
