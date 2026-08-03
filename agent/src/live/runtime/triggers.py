@@ -92,6 +92,46 @@ _US_EQUITY_HOLIDAYS: frozenset[date] = frozenset(
 
 _WEEKDAYS_MON_FRI = frozenset({0, 1, 2, 3, 4})
 
+# TWSE / TPEx closures. Same hand-maintained limitation as the US set, but the
+# Taiwan calendar rots faster: the Lunar New Year break moves every year and
+# runs the better part of a week, and 補班日 (make-up working Saturdays) are
+# NOT trading days for the exchange even though they are working days. Only
+# full-day closures are modelled; TAIFEX's after-hours session is not.
+_TW_EQUITY_HOLIDAYS: frozenset[date] = frozenset(
+    {
+        # 2026
+        date(2026, 1, 1),  # 開國紀念日
+        date(2026, 2, 14),  # 農曆年假 start (春節)
+        date(2026, 2, 16),
+        date(2026, 2, 17),
+        date(2026, 2, 18),
+        date(2026, 2, 19),
+        date(2026, 2, 20),
+        date(2026, 2, 27),  # 和平紀念日 adjusted holiday
+        date(2026, 3, 2),  # 和平紀念日 (observed)
+        date(2026, 4, 3),  # 兒童節/清明 adjusted
+        date(2026, 4, 6),  # 清明節 (observed)
+        date(2026, 5, 1),  # 勞動節
+        date(2026, 6, 19),  # 端午節
+        date(2026, 9, 25),  # 中秋節
+        date(2026, 10, 9),  # 國慶日 adjusted
+        # 2027
+        date(2027, 1, 1),  # 開國紀念日
+        date(2027, 2, 5),  # 農曆年假 start
+        date(2027, 2, 8),
+        date(2027, 2, 9),
+        date(2027, 2, 10),
+        date(2027, 2, 11),
+        date(2027, 2, 12),
+        date(2027, 2, 26),  # 和平紀念日 (observed)
+        date(2027, 4, 5),  # 清明節 (observed)
+        date(2027, 5, 3),  # 勞動節 (observed)
+        date(2027, 6, 9),  # 端午節
+        date(2027, 9, 15),  # 中秋節
+        date(2027, 10, 11),  # 國慶日 (observed)
+    }
+)
+
 # Market registry. Keys match the AssetClass-style identifiers the runner uses
 # (e.g. "us_equity", "crypto"). Add markets here, never inline in functions.
 MARKET_SPECS: Mapping[str, _MarketSpec] = {
@@ -101,6 +141,27 @@ MARKET_SPECS: Mapping[str, _MarketSpec] = {
         close_time=time(16, 0),
         weekdays=_WEEKDAYS_MON_FRI,
         holidays=_US_EQUITY_HOLIDAYS,
+    ),
+    # TWSE / TPEx continuous trading. 08:30-09:00 is the opening call auction
+    # and 13:25-13:30 the closing call; both sit inside this window, so a
+    # "market open" tick during them is correct — orders are accepted, they
+    # just do not fill continuously. 盤後定價 (14:00-14:30) is a separate venue
+    # and is not modelled.
+    "tw_equity": _MarketSpec(
+        tz="Asia/Taipei",
+        open_time=time(9, 0),
+        close_time=time(13, 30),
+        weekdays=_WEEKDAYS_MON_FRI,
+        holidays=_TW_EQUITY_HOLIDAYS,
+    ),
+    # TAIFEX regular session. Runs 15 minutes either side of the cash market so
+    # index futures can price the open and the close.
+    "tw_futures": _MarketSpec(
+        tz="Asia/Taipei",
+        open_time=time(8, 45),
+        close_time=time(13, 45),
+        weekdays=_WEEKDAYS_MON_FRI,
+        holidays=_TW_EQUITY_HOLIDAYS,
     ),
     "crypto": _MarketSpec(
         tz="UTC",

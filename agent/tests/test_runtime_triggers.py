@@ -225,3 +225,61 @@ def test_now_ms_is_utc_epoch_ms() -> None:
     val = triggers._now_ms()
     after = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
     assert before <= val <= after + 1000
+
+
+# --------------------------------------------------------------------------- #
+# Market sessions — Taiwan (tw_equity / tw_futures)                            #
+# --------------------------------------------------------------------------- #
+
+# 2026-05-29 is a Friday in Taipei too (regular trading day).
+_TW_FRI = (2026, 5, 29)
+# 2026-06-19 is 端午節 — a weekday closure.
+_TW_DRAGON_BOAT = (2026, 6, 19)
+
+
+@pytest.mark.parametrize(
+    ("now_ms", "expected"),
+    [
+        # Mid-session.
+        (_ms(*_TW_FRI, 11, 0, "Asia/Taipei"), True),
+        # The 09:00 bell is inclusive.
+        (_ms(*_TW_FRI, 9, 0, "Asia/Taipei"), True),
+        # One minute before the open — the 08:30 call auction is not RTH here.
+        (_ms(*_TW_FRI, 8, 59, "Asia/Taipei"), False),
+        # 13:30 close is exclusive, matching exchange convention.
+        (_ms(*_TW_FRI, 13, 30, "Asia/Taipei"), False),
+        (_ms(*_TW_FRI, 13, 29, "Asia/Taipei"), True),
+        # 盤後定價 (14:00) is a separate venue and is not modelled.
+        (_ms(*_TW_FRI, 14, 15, "Asia/Taipei"), False),
+        # Weekend.
+        (_ms(*_SAT, 11, 0, "Asia/Taipei"), False),
+        # Weekday public holiday.
+        (_ms(*_TW_DRAGON_BOAT, 11, 0, "Asia/Taipei"), False),
+    ],
+)
+def test_tw_equity_session(now_ms: int, expected: bool) -> None:
+    assert market_is_open_at("tw_equity", now_ms) is expected
+
+
+def test_tw_futures_brackets_the_cash_session() -> None:
+    """TAIFEX opens 15 minutes early and closes 15 minutes late."""
+    early = _ms(*_TW_FRI, 8, 50, "Asia/Taipei")
+    late = _ms(*_TW_FRI, 13, 40, "Asia/Taipei")
+    assert market_is_open_at("tw_futures", early) is True
+    assert market_is_open_at("tw_equity", early) is False
+    assert market_is_open_at("tw_futures", late) is True
+    assert market_is_open_at("tw_equity", late) is False
+
+
+def test_tw_session_is_evaluated_in_taipei_not_utc() -> None:
+    """11:00 Taipei is 03:00 UTC — a UTC-naive spec would call this closed."""
+    assert market_is_open_at("tw_equity", _ms(*_TW_FRI, 3, 0, "UTC")) is True
+    # And 11:00 UTC is 19:00 Taipei, well after the close.
+    assert market_is_open_at("tw_equity", _ms(*_TW_FRI, 11, 0, "UTC")) is False
+
+
+def test_lunar_new_year_break_is_closed_all_week() -> None:
+    """The break moves every year and runs for days — the US set has no analogue."""
+    for day in (16, 17, 18, 19, 20):
+        now = _ms(2026, 2, day, 11, 0, "Asia/Taipei")
+        assert market_is_open_at("tw_equity", now) is False, f"2026-02-{day}"
