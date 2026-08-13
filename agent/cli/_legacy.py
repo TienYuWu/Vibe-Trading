@@ -425,6 +425,7 @@ def _provider_key_env(provider: str | None) -> str | None:
         "spark": "SPARK_API_KEY",
         "iflytek": "SPARK_API_KEY",
         "zai": "ZAI_API_KEY",
+        "modelscope": "MODELSCOPE_API_KEY",
     }.get((provider or "").lower())
 
 
@@ -449,6 +450,7 @@ def _provider_base_env(provider: str | None) -> str | None:
         "spark": "SPARK_BASE_URL",
         "iflytek": "SPARK_BASE_URL",
         "zai": "ZAI_BASE_URL",
+        "modelscope": "MODELSCOPE_BASE_URL",
         "ollama": "OLLAMA_BASE_URL",
     }.get((provider or "").lower())
 
@@ -2879,6 +2881,21 @@ def cmd_provider_login(provider: str) -> int:
         account = getattr(token, "account_id", None) or "ChatGPT"
         console.print(f"[green]Authenticated with OpenAI Codex[/green]  [dim]{account}[/dim]")
         return EXIT_SUCCESS
+    except EOFError:
+        # ``docker exec`` does not allocate stdin/TTY unless explicitly asked
+        # to do so. oauth-cli-kit prompts for the browser callback URL after
+        # printing the authorization link, so an unattended stdin otherwise
+        # fails with the opaque ``EOF when reading a line`` error.
+        console.print(
+            "[red]Authentication error:[/red] OpenAI Codex OAuth needs an "
+            "interactive terminal to paste the callback URL."
+        )
+        console.print(
+            "[yellow]Docker:[/yellow] run `docker compose exec vibe-trading "
+            "vibe-trading provider login openai-codex` or add `-it` to "
+            "`docker exec`."
+        )
+        return EXIT_RUN_FAILED
     except Exception as exc:
         console.print(f"[red]Authentication error:[/red] {exc}")
         return EXIT_RUN_FAILED
@@ -4001,9 +4018,25 @@ def cmd_connector_check(
         table.add_row("Connector", profile.connector)
         table.add_row("Environment", profile.environment)
         table.add_row("Transport", profile.transport)
-        table.add_row("Configured", "yes" if report.get("configured") else "[red]no[/red]")
-        table.add_row("OAuth token", "present" if report.get("oauth_token_present") else "[yellow]missing[/yellow]")
-        table.add_row("Capabilities", ", ".join(report.get("capabilities", [])))
+        if profile.transport == "broker_sdk":
+            if "configured" in report:
+                table.add_row("Configured", "yes" if report.get("configured") else "[red]no[/red]")
+            if report.get("connection_state"):
+                table.add_row("Connection", str(report["connection_state"]))
+            sdk = report.get("sdk")
+            if isinstance(sdk, dict) and "installed" in sdk:
+                package = str(sdk.get("package") or "SDK")
+                state = "installed" if sdk.get("installed") else "[yellow]missing[/yellow]"
+                table.add_row(package, state)
+            if "tap" in report:
+                table.add_row("TAP", "enabled" if report.get("tap") else "disabled")
+            capabilities = report.get("capabilities")
+            if capabilities:
+                table.add_row("Capabilities", ", ".join(capabilities))
+        else:
+            table.add_row("Configured", "yes" if report.get("configured") else "[red]no[/red]")
+            table.add_row("OAuth token", "present" if report.get("oauth_token_present") else "[yellow]missing[/yellow]")
+            table.add_row("Capabilities", ", ".join(report.get("capabilities", [])))
         console.print(table)
 
     if report.get("status") not in {"ok"}:
@@ -4071,14 +4104,20 @@ def _normalize_mcp_value(value: Any) -> Any:
     return value
 
 
-def _flatten_account_fields(data: dict[str, Any], prefix: str = "") -> list[tuple[str, str]]:
+def _flatten_account_fields(
+    data: dict[str, Any],
+    prefix: str = "",
+    *,
+    skip_zero: bool = True,
+) -> list[tuple[str, str]]:
     """Flatten a remote-MCP account payload into (tag, value) rows.
 
     Nested one level (e.g. ``buying_power.buying_power``) rather than
     recursing arbitrarily deep, since broker account payloads are shallow.
-    Skips ``None`` and zero-valued numeric-looking fields, matching the
-    guidance the broker's own response typically includes (zero means no
-    holdings in that asset class — noise to omit, not a real 0.00 balance).
+    Skips ``None``. By default it also skips zero-valued numeric-looking fields,
+    matching remote-MCP guidance where zero means an absent asset-class balance.
+    Direct SDK account summaries can disable that behavior because a zero or
+    false risk/status field is meaningful account state.
     """
     rows: list[tuple[str, str]] = []
     for key, value in data.items():
@@ -4087,16 +4126,52 @@ def _flatten_account_fields(data: dict[str, Any], prefix: str = "") -> list[tupl
         label = f"{prefix}{key}"
         normalized = _normalize_mcp_value(value)
         if isinstance(normalized, dict):
-            rows.extend(_flatten_account_fields(normalized, prefix=f"{label}."))
+            rows.extend(
+                _flatten_account_fields(
+                    normalized,
+                    prefix=f"{label}.",
+                    skip_zero=skip_zero,
+                )
+            )
             continue
         text = str(normalized)
-        try:
-            if float(text) == 0.0:
-                continue
-        except (TypeError, ValueError):
-            pass
+        if skip_zero:
+            try:
+                if float(text) == 0.0:
+                    continue
+            except (TypeError, ValueError):
+                pass
         rows.append((label, text))
     return rows
+
+
+def _print_connector_account_mapping(
+    result: dict[str, Any],
+    account_data: dict[str, Any],
+) -> int:
+    """Render the flat/nested ``account`` mapping used by direct SDK brokers."""
+    account_label = (
+        account_data.get("account_number")
+        or result.get("account_number")
+        or result.get("profile_id")
+        or result.get("profile")
+        or "unknown"
+    )
+    table = Table(
+        title=f"Account Summary · {result.get('profile_id') or result.get('profile') or account_label}",
+        box=box.SIMPLE_HEAVY,
+        show_lines=False,
+    )
+    table.add_column("Field")
+    table.add_column("Value", justify="right")
+    currency = account_data.get("currency")
+    if currency is not None:
+        table.add_row("currency", str(currency))
+    for tag, value in _flatten_account_fields(account_data, skip_zero=False):
+        table.add_row(tag, value)
+    console.print(f"Account: [cyan]{rich_escape(str(account_label))}[/cyan]")
+    console.print(table)
+    return EXIT_SUCCESS
 
 
 def _print_connector_account(result: dict[str, Any]) -> int:
@@ -4108,6 +4183,9 @@ def _print_connector_account(result: dict[str, Any]) -> int:
         label = accounts if accounts != "(none)" else result.get("profile_id", result.get("profile", "unknown"))
         console.print(f"Accounts: [cyan]{rich_escape(str(label))}[/cyan]")
         return _print_connector_balances(result)
+    account_data = _normalize_mcp_value(result.get("account"))
+    if not rows and isinstance(account_data, dict) and account_data:
+        return _print_connector_account_mapping(result, account_data)
     if not rows:
         # Not the broker_sdk flat shape — try the remote-MCP nested shape.
         # Robinhood's tool result double-wraps: result["data"] unwraps to
@@ -4714,6 +4792,10 @@ def _build_parser() -> argparse.ArgumentParser:
     chat_parser = subparsers.add_parser("chat", help="Interactive chat mode")
     chat_parser.add_argument("--max-iter", dest="chat_max_iter", type=int, default=50, help="Maximum agent iterations")
 
+    subparsers.add_parser(
+        "update", help="Check for and install the latest vibe-trading-ai release from PyPI"
+    )
+
     subparsers.add_parser("init", help="Interactive setup: create ~/.vibe-trading/.env")
 
     # Cross-platform frontend setup. See cmd_setup() for details.
@@ -4866,6 +4948,10 @@ def _build_parser() -> argparse.ArgumentParser:
     from src.hypotheses.cli_handlers import add_subparser as _add_hypothesis_subparser
     _add_hypothesis_subparser(subparsers)
 
+    # Scheduled-research playbook templates (list / show / create)
+    from cli.commands.research_playbook import add_subparser as _add_playbook_subparser
+    _add_playbook_subparser(subparsers)
+
     return parser
 
 
@@ -4947,6 +5033,16 @@ _PROVIDER_CHOICES: list[dict[str, str | None]] = [
         "model": "deepseek-ai/DeepSeek-V3.1-Terminus",
         "key_prefix": "sk-",
         "key_placeholder": "sk-...",
+    },
+    {
+        "label": "ModelScope",
+        "provider": "modelscope",
+        "key_env": "MODELSCOPE_API_KEY",
+        "base_env": "MODELSCOPE_BASE_URL",
+        "base_url": "https://api-inference.modelscope.cn/v1",
+        "model": "Qwen/Qwen3.5-27B",
+        "key_prefix": None,
+        "key_placeholder": "api-key...",
     },
     {
         "label": "NVIDIA NIM",
@@ -5735,12 +5831,19 @@ def main(argv: list[str] | None = None) -> int:
         return _coerce_exit_code(cmd_show(args.show))
     if args.command == "chat":
         return _coerce_exit_code(cmd_interactive(args.chat_max_iter))
+    if args.command == "update":
+        from cli.commands.update import cmd_update
+
+        return _coerce_exit_code(cmd_update())
     if args.command == "alpha":
         from src.factors.cli_handlers import dispatch as _alpha_dispatch
         return _coerce_exit_code(_alpha_dispatch(args))
     if args.command == "hypothesis":
         from src.hypotheses.cli_handlers import dispatch as _hyp_dispatch
         return _coerce_exit_code(_hyp_dispatch(args))
+    if args.command == "playbook":
+        from cli.commands.research_playbook import dispatch as _playbook_dispatch
+        return _coerce_exit_code(_playbook_dispatch(args))
     if args.command == "connector":
         return _coerce_exit_code(_dispatch_connector(args))
     if args.command == "memory":

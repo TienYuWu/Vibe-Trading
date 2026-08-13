@@ -138,13 +138,18 @@ _NO_NETWORK_FALLBACK_SOURCES: frozenset[str] = frozenset({"local", "qveris"})  #
 FALLBACK_CHAINS: dict[str, list[str]] = {
     "a_share":   ["tencent", "mootdx", "eastmoney", "baostock", "akshare", "tushare", "local"],
     "us_equity": ["yahoo", "stooq", "sina", "eastmoney", "yfinance", "tiingo", "fmp", "finnhub", "alphavantage", "longbridge", "akshare", "local"],
-    "hk_equity": ["eastmoney", "yahoo", "futu", "yfinance", "akshare", "longbridge", "local"],
+    # HK: tencent leads (no observed IP ban); akshare (Eastmoney-backed)
+    # precedes the Yahoo-SDK family, which is blocked from mainland IPs;
+    # tushare hk_daily is key-gated.
+    "hk_equity": ["tencent", "eastmoney", "yahoo", "futu", "akshare", "yfinance", "tushare", "longbridge", "local"],
     "india_equity": ["yahoo", "yfinance", "india_broker", "local"],
     "kr_equity":   ["pykrx", "yahoo", "yfinance", "local"],
     # Taiwan: FinMind is the only free source carrying TAIFEX futures; Yahoo
     # covers TWSE cash equities as NNNN.TW but has no derivatives at all.
     "tw_equity": ["finmind", "yahoo", "yfinance", "local"],
     "tw_futures": ["finmind", "local"],
+    # TSX (.TO) / TSX Venture (.V): direct Yahoo first, SDK fallback second.
+    "ca_equity":   ["yahoo", "yfinance", "local"],
     # OKX first (native), then dedicated Binance, then generic CCXT / Yahoo.
     "crypto":    ["okx", "binance", "ccxt", "yfinance", "local"],
     "futures":   ["tushare", "akshare", "local"],

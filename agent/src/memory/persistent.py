@@ -115,7 +115,11 @@ _NON_LATIN_SCRIPT_RANGES = (
     "Ѐ-ӿ"  # Cyrillic
 )
 
-_TOKEN_RE = re.compile(rf"[a-zA-Z0-9]{{3,}}|[{_NON_LATIN_SCRIPT_RANGES}]")
+# Matches search_index.py's FTS5 query sanitizer minimum (2+ ASCII chars) so
+# the token-scan fallback in find_relevant() finds the same content the FTS5
+# path does — short tokens like ticker symbols ("GE") or country codes ("US")
+# must be retrievable regardless of whether VT_MEMORY_FTS_INDEX is enabled.
+_TOKEN_RE = re.compile(rf"[a-zA-Z0-9]{{2,}}|[{_NON_LATIN_SCRIPT_RANGES}]")
 _SLUG_DISALLOWED_RE = re.compile(rf"[^a-z0-9_\-{_NON_LATIN_SCRIPT_RANGES}]")
 
 
@@ -143,7 +147,7 @@ class MemoryEntry:
 
 
 def _tokenize(text: str) -> set[str]:
-    """Split text into searchable tokens (ASCII >=3 chars + non-Latin chars)."""
+    """Split text into searchable tokens (ASCII >=2 chars + non-Latin chars)."""
     return set(_TOKEN_RE.findall(text.lower()))
 
 
@@ -386,8 +390,21 @@ class PersistentMemory:
                     if all_entries is None:
                         all_entries = self._scan_entries()
                     entry_map = {e.id: e for e in all_entries}
-                    fts_results = [entry_map[m.entry_id] for m in matches if m.entry_id in entry_map]
-                    if fts_results:
+                    fts_pairs = [
+                        (m, entry_map[m.entry_id]) for m in matches if m.entry_id in entry_map
+                    ]
+                    if fts_pairs:
+                        if _is_decay_enabled():
+                            # FTS5's rank is more negative for stronger matches;
+                            # negate it onto the same scale the token-scan
+                            # fallback below uses and apply the same importance
+                            # weighting, so decay isn't silently inert whenever
+                            # FTS produces a result.
+                            fts_pairs.sort(
+                                key=lambda pair: -pair[0].rank * (0.5 + 0.5 * pair[1].importance),
+                                reverse=True,
+                            )
+                        fts_results = [entry for _, entry in fts_pairs]
                         return fts_results[:max_results]
             except Exception:
                 logger.debug("FTS5 search failed, falling back to scan", exc_info=True)
@@ -428,10 +445,10 @@ class PersistentMemory:
                 # Add linked entries not already in results
                 result_paths = {r.path for r in results}
                 for entry in all_entries:
+                    if len(results) >= max_results:
+                        break
                     if entry.path.stem in linked_ids and entry.path not in result_paths:
                         results.append(entry)
-                        if len(results) >= max_results:
-                            break
             except Exception:
                 logger.debug("semantic link expansion failed", exc_info=True)
 
@@ -490,7 +507,14 @@ class PersistentMemory:
         if get_env_config().memory.hierarchy_enabled:
             from src.memory.hierarchy import MemoryHierarchy
             hierarchy = MemoryHierarchy(self._dir)
-            path = hierarchy.route_entry(memory_type, slug)
+            # route_entry() treats its second argument as the leaf filename
+            # verbatim, so the ".md" has to be here: a bare slug wrote entries
+            # with no suffix, and every scan filters on suffix == ".md", which
+            # made them invisible to list_entries() and find(). The category
+            # directory already carries the type, and the name must match what
+            # recover_extensionless_entries() renames orphans to, or the same
+            # entry ends up on disk twice.
+            path = hierarchy.route_entry(memory_type, f"{slug}.md")
         else:
             filename = f"{memory_type}_{slug}.md"
             path = self._dir / filename
@@ -606,8 +630,9 @@ class PersistentMemory:
         if self._index_path.exists():
             lines = self._index_path.read_text(encoding="utf-8").split("\n")
             updated = False
+            target_prefix = f"- [{title}]("
             for i, line in enumerate(lines):
-                if f"[{title}]" in line:
+                if line.startswith(target_prefix):
                     lines[i] = new_line
                     updated = True
                     break

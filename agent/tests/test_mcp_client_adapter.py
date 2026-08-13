@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
+from fastmcp import Client, FastMCP
 from fastmcp.client.client import CallToolResult
 from fastmcp.exceptions import McpError, ToolError
 from mcp import types as mcp_types
+from pydantic import BaseModel, field_serializer
 
 from src.config.schema import MCPServerConfig
 from src.tools.mcp import (
@@ -275,6 +283,249 @@ def test_remote_tool_execute_forwards_arguments_for_composed_schema() -> None:
 
     assert payload["status"] == "ok"
     assert state["call_records"][0]["arguments"] == {"symbol": "AAPL"}
+
+
+@dataclass
+class _RobinhoodPosition:
+    """FastMCP-style generated dataclass nested in a Robinhood response."""
+
+    symbol: str
+    quantity: float
+    opened_on: date
+    updated_at: datetime
+
+
+@dataclass
+class _RobinhoodPortfolio:
+    """Representative account/positions payload from Robinhood Agentic MCP."""
+
+    account_number: str
+    buying_power: float
+    positions: list[_RobinhoodPosition]
+    market_dates: dict[str, date]
+
+
+def _execute_data_result(
+    data: Any,
+    *,
+    structured_content: dict[str, Any] | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute one fake MCP tool with a parsed FastMCP result."""
+    state = {
+        "list_calls": 0,
+        "call_calls": 0,
+        "call_records": [],
+        "list_outcomes": [[
+            mcp_types.Tool(
+                name="get_data",
+                description="Return test data",
+                inputSchema={"type": "object", "properties": {}},
+            )
+        ]],
+        "call_outcomes": [
+            CallToolResult(
+                content=[],
+                structured_content=structured_content,
+                meta=meta,
+                data=data,
+            )
+        ],
+    }
+    tool = build_mcp_tool_wrappers(
+        "demo",
+        _make_config(enabled_tools=["get_data"]),
+        client_factory=_make_factory(state),
+    )[0]
+    return json.loads(tool.execute())
+
+
+def test_robinhood_dataclass_dates_are_json_safe_end_to_end() -> None:
+    """A real FastMCP dataclass round trip must stay JSON-safe (#922)."""
+    server = FastMCP("robinhood-regression")
+
+    @server.tool
+    def get_portfolio() -> _RobinhoodPortfolio:
+        return _RobinhoodPortfolio(
+            account_number="RH-123",
+            buying_power=2500.75,
+            positions=[
+                _RobinhoodPosition(
+                    symbol="AAPL",
+                    quantity=3.5,
+                    opened_on=date(2026, 7, 31),
+                    updated_at=datetime(2026, 8, 1, 7, 30, tzinfo=timezone.utc),
+                )
+            ],
+            market_dates={"next_open": date(2026, 8, 3)},
+        )
+
+    structured_portfolio = {
+        "account_number": "RH-123",
+        "buying_power": 2500.75,
+        "positions": [
+            {
+                "symbol": "AAPL",
+                "quantity": 3.5,
+                "opened_on": "2026-07-31",
+                "updated_at": "2026-08-01T07:30:00Z",
+            }
+        ],
+        "market_dates": {"next_open": "2026-08-03"},
+    }
+
+    tool = build_mcp_tool_wrappers(
+        "robinhood",
+        _make_config(enabled_tools=["get_portfolio"]),
+        client_factory=lambda: Client(server),
+    )[0]
+    payload = json.loads(tool.execute())
+
+    assert payload["status"] == "ok"
+    assert payload["data"] == structured_portfolio
+    assert payload["structured_content"] == structured_portfolio
+
+
+@pytest.mark.parametrize(
+    ("data", "structured", "meta", "expected"),
+    [
+        (8, {"result": 8}, None, 8),
+        (
+            date(2026, 8, 3),
+            {"result": "2026-08-03"},
+            {"fastmcp": {"wrap_result": True}},
+            "2026-08-03",
+        ),
+        (
+            [date(2026, 8, 3)],
+            {"result": ["2026-08-03"]},
+            None,
+            ["2026-08-03"],
+        ),
+    ],
+)
+def test_fastmcp_wrapped_results_keep_unwrapped_data_shape(
+    data: Any,
+    structured: dict[str, Any],
+    meta: dict[str, Any] | None,
+    expected: Any,
+) -> None:
+    """Keep FastMCP's primitive unwrapping across supported versions."""
+    payload = _execute_data_result(
+        data,
+        structured_content=structured,
+        meta=meta,
+    )
+
+    assert payload["data"] == expected
+    assert payload["structured_content"] == structured
+
+
+@dataclass
+class _SingleResultObject:
+    result: date
+
+
+def test_single_result_object_schema_is_not_mistaken_for_fastmcp_wrapper() -> None:
+    structured = {"result": "2026-08-03"}
+
+    payload = _execute_data_result(
+        _SingleResultObject(result=date(2026, 8, 3)),
+        structured_content=structured,
+    )
+
+    assert payload["data"] == structured
+
+
+def test_structured_content_remains_available_when_fastmcp_hydration_fails() -> None:
+    structured = {"account_number": "RH-123", "buying_power": 2500.75}
+
+    payload = _execute_data_result(None, structured_content=structured)
+
+    assert payload["status"] == "ok"
+    assert payload["data"] == structured
+    assert payload["structured_content"] == structured
+
+
+class _OrderState(Enum):
+    OPEN = "open"
+
+
+@dataclass
+class _StandardJsonAdapters:
+    amount: Decimal
+    order_id: UUID
+    output_path: Path
+    state: _OrderState
+    labels: set[str]
+    range_pair: tuple[int, int]
+
+
+def test_data_only_fallback_uses_pydantic_json_serialization() -> None:
+    payload = _execute_data_result(
+        _StandardJsonAdapters(
+            amount=Decimal("1234.5600"),
+            order_id=UUID("12345678-1234-5678-1234-567812345678"),
+            output_path=Path("reports/daily.json"),
+            state=_OrderState.OPEN,
+            labels={"beta", "alpha"},
+            range_pair=(1, 5),
+        )
+    )
+
+    assert payload["status"] == "ok"
+    assert set(payload["data"].pop("labels")) == {"alpha", "beta"}
+    assert payload["data"] == {
+        "amount": "1234.5600",
+        "order_id": "12345678-1234-5678-1234-567812345678",
+        "output_path": "reports/daily.json",
+        "state": "open",
+        "range_pair": [1, 5],
+    }
+
+
+def test_unsupported_mcp_value_returns_explicit_error_not_false_cycle() -> None:
+    class OpaqueAccountValue:
+        pass
+
+    payload = _execute_data_result(OpaqueAccountValue())
+
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "TypeError"
+    assert "Unable to serialize MCP result type" in payload["error"]
+    assert "OpaqueAccountValue" in payload["error"]
+    assert "Circular reference detected" not in payload["error"]
+
+
+def test_actual_mcp_result_cycle_returns_sanitized_error() -> None:
+    cyclic: list[Any] = []
+    cyclic.append(cyclic)
+
+    payload = _execute_data_result(cyclic)
+
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "TypeError"
+    assert "Unable to serialize MCP result type builtins.list" in payload["error"]
+    assert "ValueError" in payload["error"]
+    assert "Circular reference detected" not in payload["error"]
+
+
+def test_data_only_serialization_failure_does_not_leak_exception_text() -> None:
+    class BrokenAccountValue(BaseModel):
+        account_number: str
+
+        @field_serializer("account_number")
+        def serialize_account_number(self, value: str) -> str:
+            del value
+            raise RuntimeError("api_key=should-never-appear")
+
+    payload = _execute_data_result(BrokenAccountValue(account_number="RH-123"))
+
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "TypeError"
+    assert "Unable to serialize MCP result type" in payload["error"]
+    assert "PydanticSerializationError" in payload["error"]
+    assert "should-never-appear" not in payload["error"]
 
 
 def test_build_mcp_tool_wrappers_disambiguates_colliding_local_names() -> None:

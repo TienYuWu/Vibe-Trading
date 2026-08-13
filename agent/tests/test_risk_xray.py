@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from backtest.risk_xray import (
+    _drawdown,
     average_invested_weights,
     compute_risk_xray,
     render_risk_xray_markdown,
@@ -117,6 +118,24 @@ def test_max_drawdown_on_hand_built_curve():
     result = compute_risk_xray(closes, {"AAA": 1.0}, min_history=2)
     assert result["drawdown"]["max_drawdown"] == pytest.approx(-0.5)
     _assert_strict_json(result)
+
+
+def test_drawdown_uses_initial_wealth_before_first_return():
+    dates = pd.date_range("2026-01-02", periods=2, freq="D")
+
+    result = _drawdown(pd.Series([-0.2, 0.125], index=dates))
+
+    assert result["max_drawdown"] == pytest.approx(-0.2)
+    assert result["max_drawdown_start"] == str(dates[0])
+
+
+def test_drawdown_remains_negative_after_wealth_crosses_zero():
+    dates = pd.date_range("2026-01-02", periods=3, freq="D")
+
+    result = _drawdown(pd.Series([-1.2, 1.5, 1.0], index=dates))
+
+    assert result["max_drawdown"] == pytest.approx(-2.0)
+    assert result["max_drawdown_trough"] == str(dates[-1])
 
 
 def test_expected_shortfall_on_known_tail():

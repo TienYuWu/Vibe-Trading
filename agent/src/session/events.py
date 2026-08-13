@@ -215,7 +215,6 @@ class EventBus:
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield event
                 except asyncio.TimeoutError:
                     yield SSEEvent(
                         event_id=None,
@@ -223,6 +222,11 @@ class EventBus:
                         data={"ts": time.time()},
                         session_id=session_id,
                     )
+                    continue
+                if event.event_type == "session_cleared":
+                    yield event
+                    break
+                yield event
         finally:
             with self._lock:
                 subs = self._subscribers.get(session_id, [])
@@ -230,10 +234,31 @@ class EventBus:
                     subs.remove(queue)
 
     def clear(self, session_id: str) -> None:
-        """Clear the buffered events for a session.
+        """Clear the buffered events and notify subscribers for a session.
+
+        Subscriber queues receive a ``session_cleared`` sentinel event so
+        they can break out of their ``while True`` loop instead of waiting
+        indefinitely on a cleared session. The subscriber list is then
+        dropped so future ``publish`` calls do not enqueue to dead queues.
 
         Args:
             session_id: Session ID.
         """
         with self._lock:
             self._buffers.pop(session_id, None)
+            subs = self._subscribers.pop(session_id, [])
+
+        sentinel = SSEEvent(
+            event_id=None,
+            event_type="session_cleared",
+            data={},
+            session_id=session_id,
+        )
+        for queue in subs:
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._safe_put, queue, sentinel)
+            else:
+                try:
+                    queue.put_nowait(sentinel)
+                except asyncio.QueueFull:
+                    pass

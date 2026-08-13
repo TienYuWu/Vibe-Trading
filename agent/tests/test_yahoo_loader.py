@@ -54,7 +54,7 @@ def _intraday_stamped_row(date_str: str, open_, high, low, close, volume):
 
 
 class TestSymbolGating:
-    """_is_supported accepts US/HK/India suffixes only."""
+    """_is_supported accepts the equity suffixes served by Yahoo."""
 
     def test_accepts_us(self):
         assert _is_supported("AAPL.US") is True
@@ -68,6 +68,11 @@ class TestSymbolGating:
         assert _is_supported("RELIANCE.NS") is True
         assert _is_supported("reliance.ns") is True
         assert _is_supported("500325.BO") is True
+
+    def test_accepts_canada(self):
+        assert _is_supported("TD.TO") is True
+        assert _is_supported("PNG.V") is True
+        assert _is_supported("bbd-b.to") is True
 
     def test_rejects_others(self):
         assert _is_supported("601398.SH") is False
@@ -308,7 +313,7 @@ class TestLoaderMetadata:
         loader = DataLoader()
         assert loader.name == "yahoo"
         assert loader.markets == {
-            "us_equity", "hk_equity", "india_equity", "kr_equity",
+            "us_equity", "hk_equity", "india_equity", "kr_equity", "ca_equity",
         }
         assert loader.requires_auth is False
         assert loader.is_available() is True

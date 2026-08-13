@@ -23,8 +23,9 @@ def infer_market(code: str) -> str:
 
     1. Crypto pair spellings (``BTC-USDT``, ``ETH/USD`` …).
     2. Explicit exchange suffix — always authoritative (``.HK``, ``.SH``/
-       ``.SZ``/``.BJ``, ``.US``). Bare HK and A-share codes are both purely
-       numeric, so the suffix is the only reliable disambiguator.
+       ``.SZ``/``.BJ``, ``.TO``/``.V``, ``.US``). Bare HK and A-share codes
+       are both purely numeric, so the suffix is the only reliable
+       disambiguator.
     3. Bare numeric codes by digit length: A-share codes are exactly 6 digits
        (600000, 000001, 300750, 688981, 830799); HK codes are at most 5
        (700, 0700, 9988, 3690). Prefix alone cannot tell them apart — both
@@ -41,6 +42,8 @@ def infer_market(code: str) -> str:
         return "a_share"
     if code_upper.endswith((".KS", ".KQ")):
         return "kr_equity"
+    if code_upper.endswith((".TO", ".V")):
+        return "ca_equity"
     if code_upper.endswith(".US"):
         return "us_equity"
     if code_upper.isdigit():

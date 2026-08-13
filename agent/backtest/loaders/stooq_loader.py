@@ -77,6 +77,9 @@ class DataLoader:
 
     name = "stooq"
     markets = {"us_equity"}
+    # Stooq US EOD volume is single shares (universal US convention,
+    # HKUDS/Vibe-Trading#1062).
+    volume_units = {"us_equity": "shares"}
     requires_auth = False
 
     def __init__(self) -> None:

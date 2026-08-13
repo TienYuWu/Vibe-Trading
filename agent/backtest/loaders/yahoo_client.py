@@ -16,6 +16,8 @@ Symbol convention (Vibe-Trading -> Yahoo):
   * HK ``00700.HK`` -> ``0700.HK`` (Yahoo drops the leading zero to 4 digits)
   * India ``RELIANCE.NS`` / ``500325.BO`` -> unchanged (Yahoo carries the
     ``.NS``/``.BO`` suffix verbatim)
+  * Canada ``TD.TO`` / ``PNG.V`` -> unchanged (Yahoo carries the
+    ``.TO``/``.V`` suffix verbatim)
   * Anything else is passed through unchanged (e.g. ``BTC-USD``, ``^GSPC``).
 
 This module is provider-specific glue only; it returns plain Python
@@ -70,12 +72,14 @@ def map_symbol(symbol: str) -> str:
     """Translate a Vibe-Trading symbol into Yahoo's ticker convention.
 
     Args:
-        symbol: Project-side symbol, e.g. ``AAPL.US``, ``00700.HK``, ``BTC-USD``.
+        symbol: Project-side symbol, e.g. ``AAPL.US``, ``00700.HK``, ``TD.TO``,
+            or ``BTC-USD``.
 
     Returns:
         The Yahoo ticker: ``.US`` suffix stripped; ``.HK`` codes normalized to
         a 4-digit base (``00700.HK`` -> ``0700.HK``); India ``.NS``/``.BO`` and
-        everything else unchanged (Yahoo carries those suffixes verbatim).
+        Canada ``.TO``/``.V`` suffixes, plus all other symbols, pass through
+        unchanged.
     """
     cleaned = symbol.strip()
     upper = cleaned.upper()

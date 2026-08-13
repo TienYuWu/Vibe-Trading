@@ -41,7 +41,7 @@ from src.swarm.task_store import (
 )
 from src.tools.mcp import invalidate_mcp_specs_cache
 from src.tools.redaction import redact_internal_paths
-from src.swarm.worker import run_worker
+from src.swarm.worker import agent_artifact_dir, clear_agent_artifacts, run_worker
 
 logger = logging.getLogger(__name__)
 
@@ -693,6 +693,13 @@ class SwarmRuntime:
                     attempt + 1,
                     max_retries + 1,
                 )
+                # A retry re-invokes run_worker against the same artifact
+                # directory. Without clearing it first, a failed attempt's
+                # report.md (or any other tool-written file) would still be
+                # there when the retried attempt reads the directory back,
+                # silently substituting stale content for the new attempt's
+                # real result.
+                clear_agent_artifacts(agent_artifact_dir(run_dir, agent_spec.id))
 
             result = run_worker(
                 agent_spec=agent_spec,

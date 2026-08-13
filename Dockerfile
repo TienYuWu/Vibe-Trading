@@ -61,6 +61,10 @@ RUN pip install --no-cache-dir -e .
 # ============================================================================
 FROM builder AS test
 
+# test_readme_counts.py asserts all five READMEs state the real counts. Only
+# README.md reaches the builder stage, so bring in the translations here.
+COPY README_ar.md README_ja.md README_ko.md README_zh.md ./
+
 RUN pip install --no-cache-dir -e ".[dev]"
 
 # test_agent_guide_paths asserts that every path AGENT_CONTRIBUTOR_GUIDE.md
@@ -82,7 +86,7 @@ FROM python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0
 
 LABEL org.opencontainers.image.title="Vibe-Trading" \
     org.opencontainers.image.description="Natural-language finance research AI agent with backtesting" \
-    org.opencontainers.image.version="0.1.12" \
+    org.opencontainers.image.version="0.1.13" \
     org.opencontainers.image.source="https://github.com/HKUDS/Vibe-Trading" \
     org.opencontainers.image.licenses="MIT"
 

@@ -229,6 +229,7 @@ _ENVIRONMENT_IDENTITIES = frozenset(
         "host_separated",
         "read_only_no_runtime_discriminator",
         "simulated_locally",
+        "path_separated_key_bound",
         "trd_env_acc_list",
     }
 )

@@ -183,6 +183,11 @@ _PROVIDERS: dict[str, ProviderCapabilities] = {
     "spark": _SPARK_CAPABILITIES,
     "iflytek": _SPARK_CAPABILITIES,
     "zai": ProviderCapabilities("zai", "ZAI_API_KEY", "ZAI_BASE_URL"),
+    "modelscope": ProviderCapabilities(
+        "modelscope",
+        "MODELSCOPE_API_KEY",
+        "MODELSCOPE_BASE_URL",
+    ),
     "ollama": ProviderCapabilities("ollama", None, "OLLAMA_BASE_URL"),
     "openai-codex": _OPENAI_CODEX_CAPABILITIES,
     "openai_codex": _OPENAI_CODEX_CAPABILITIES,
@@ -307,7 +312,10 @@ def get_llm_credentials(
         Reads dynamic env vars via ``os.getenv`` — not part of ``EnvConfig``.
         When no base URL is set in the environment, falls back to the provider
         catalog's ``default_base_url`` so a provider set without an explicit
-        ``*_BASE_URL`` still hits its canonical endpoint.
+        ``*_BASE_URL`` still hits its canonical endpoint. Ollama URLs are
+        normalized here to its OpenAI-compatible ``/v1`` root so diagnostics,
+        preflight, environment synchronization, and runtime construction all
+        consume the same endpoint.
     """
     caps = get_provider_capabilities(provider, model)
     key_env, base_env = caps.api_key_env, caps.base_url_env
@@ -338,6 +346,10 @@ def get_llm_credentials(
         )
         or _provider_default_base_url(caps.name)
     )
+    if caps.name == "ollama":
+        base_url = base_url.strip().rstrip("/")
+        if base_url and not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
 
     return {
         "provider": (provider or "").strip().lower(),

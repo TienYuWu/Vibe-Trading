@@ -5,20 +5,373 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-08-10
+
+Rolls up 408 commits / 162 merged pull requests since 0.1.12.
+
 ### Added
-- **Memory Tier 2: Structural Organization** — four independently-gated modules for memory lifecycle enhancement:
-  - H-MEM hierarchical directory routing (`VT_MEMORY_HIERARCHY`)
-  - A-MEM semantic linking via BM25 (`VT_MEMORY_LINKS`)
-  - Auto-compression pipeline with TF-IDF key-sentence extraction (`VT_MEMORY_COMPRESSION`)
-  - FTS5 full-text search index with CJK bigram tokenization (`VT_MEMORY_FTS_INDEX`)
-- **`VT_MEMORY=off|on|full` preset** — one-line business-friendly configuration replacing 7 individual flags
-  - `off`: no lifecycle management (default)
-  - `on`: quality scoring + auto-decay + garbage collection (Tier 1)
-  - `full`: all features including hierarchy, links, compression, and FTS (Tier 1 + Tier 2)
-  - Individual `VT_MEMORY_*` flags still work as explicit overrides
-- Dependency-conflict warnings when `VT_MEMORY_COMPRESSION=true` without `VT_MEMORY_GC`
-- Lazy FTS5 auto-rebuild on first search when index is empty
-- 9 end-to-end integration tests + 23 benchmark tests against real production corpus
+- **`src/quantlib` — a tested finance-math layer** (265 functions across 19
+  modules): one
+  implementation each of Black-Scholes price/greeks/IV inversion, bond math +
+  Nelson-Siegel/Svensson, Altman Z + Merton/KMV, stationarity/cointegration/
+  GARCH/bootstrap, VaR/CVaR/EVT, Brinson-Fachler attribution, event studies,
+  multiple-testing control, and purged cross-validation. Skills now *import*
+  these instead of carrying formulas inside markdown code blocks. Reachable
+  from the CLI, the Web UI, the REST API and MCP through the read-only,
+  pure-compute `quantlib_call` tool, so the finance math works where `bash` is
+  gated off — module allowlist, `__all__`-only, `export_*` refused.
+  `attribution` and `impact` were allowlisted but carried no `__all__`, so the
+  tool listed zero functions for them; both now export, and a guard test fails
+  when any allowlisted module exposes nothing. Econometrics needs the
+  `stats` extra (`statsmodels`/`arch`), which the functions lazy-import and
+  name.
+- **Valuation engine** (`src/quantlib/valuation/`): `run_dcf` (FCFF bridge,
+  WACC build, dual terminal value that cross-checks each method against the
+  other's implied multiple and implied g, mid-year discounting, net-debt
+  bridge, WACC×g grid), `run_comps` (EV bridge, LTM + calendar-year
+  calendarisation, multiple matrix — a peer with a non-positive denominator is
+  *excluded and reported*, never averaged in as a negative multiple), a linked
+  three-statement projection with a hard balance assertion, explicit revolver
+  plug and an iterated interest↔debt circularity that must converge or raise,
+  plus input-hashed versioned artifacts with xlsx/pptx export. One shared rule
+  in `contracts.py`: **a missing input makes a model NOT RUNNABLE and is never
+  silently defaulted.**
+- **Typed entity + irregular dated cash-flow substrate** (`src/entities/`) —
+  the non-bar ingestion path for NAVs, capital calls and coupons, deliberately
+  parallel to the bar engines so a `nav` column can never reach one and get
+  priced as a close. Surfaced by the read-only `cashflow_performance` tool
+  (XIRR / MOIC / DPI / TVPI / TWR / Modified Dietz / MWR over an irregular
+  dated series).
+- **`orderbook_depth`** (read-only): crypto L2 ladder via ccxt — spread bps,
+  depth imbalance, and the impact cost of a stated notional walked through the
+  real book in both directions. `fully_filled` and `timestamp_source` must be
+  read before quoting anything; equities still have no depth source.
+- **Governance wired into every run** (`src/governance/`): a run manifest hashes
+  the prompt, skill contents, tool registry and package versions so "what
+  methodology produced that number" is answerable, and the audit ledger is
+  hash-chained + fsynced so editing or deleting a record is detectable (an edit
+  that recomputes its own hash is caught one record later via
+  `prev_hash_mismatch`). All 30 swarm presets were re-audited — a deliverable
+  no granted tool can compute is now declared as such instead of invented.
+- **Four read-only data tools, all on free public sources**:
+  `get_institutional_holdings` (SEC 13F-HR; manager / ticker-holders /
+  top-managers modes with quarter-over-quarter position diffs, and cover-page
+  unit detection because pre-2023 filings report in thousands),
+  `etf_holdings` (cross-market look-through — SEC N-PORT for US, and for
+  A-shares the semi-annual/annual reports that carry the *full* book rather
+  than the quarterly top ten: 510300 returns 342 rows / 98.66% of net assets
+  vs 10 rows / 22.74%; `coverage` distinguishes `full_portfolio` from
+  `top_n_disclosed` and every response stamps the report period),
+  `prediction_market` (event-contract search/event/market/history with prices
+  surfaced as labelled implied probability), and `research_papers`
+  (arXiv + OpenAlex search/read with source-anchored claim extraction that
+  marks what a source does not state instead of inferring it).
+- **Institutional research surface**: six slash commands — `/comps` `/dcf`
+  `/attrib` `/memo` `/earnings` `/screen` — each carrying a step skeleton and
+  an arithmetic-consistent worked example (the Brinson decomposition sums
+  exactly to active return; the earnings bridge sums exactly to the EPS delta).
+- **Investor lenses** as a standalone skill (`src/skills/investor-lenses/`):
+  named-investor reasoning frameworks as stackable analysis overlays, decoupled
+  from the data layer. Each lens is an operating procedure — priority signals,
+  disqualifying conditions, typical misuse — not a biography, and names no tool.
+- **Five ready-to-schedule research playbooks** (premarket brief, earnings-season
+  tracker, portfolio checkup, A-share money flow, institutional-holdings diff),
+  reachable three ways: auth-gated REST routes beside the existing CRUD, a
+  `vibe-trading playbook` CLI subcommand, and a `/playbook` slash command.
+  Templates state their data needs in natural language rather than naming
+  tools, so coverage can grow without editing them, and every one mandates
+  naming a missing input instead of filling it from memory.
+- **Desktop shell** — a source-first Electron host that owns the existing
+  backend lifecycle (random loopback port, per-launch secret, five-locale
+  startup recovery, owned-process cleanup) (#923). Windows packaging assembles
+  a checksum-pinned embedded Python 3.12 runtime with x64 NSIS review/signing
+  paths, plus Electron `safeStorage` for an allowlisted credential set — the
+  renderer can set or clear secrets but never read them, plaintext config
+  migrates once, decrypted values reach only the owned backend, and both
+  unsigned-review and signed builds fail closed on the wrong signature state
+  (#1015). No installer artifact was published from that PR.
+- **Canadian equities end to end** (#1024, #1019, #1037, closes #952): `.TO`/`.V`
+  symbols classified in CAD, routed Yahoo → yfinance → local, executed under
+  Canada-specific GlobalEquity rules, benchmarked against `XIC.TO`, with
+  mixed-currency aggregation refused.
+- **Korea equity (KRX: KOSPI/KOSDAQ)** as the 9th backtest engine (#693, thanks
+  @JungHoonGhae) — execution-time ±30% band on a unified tick grid, structurally
+  long-only, config-driven 2026 0.20% securities transaction tax, optional
+  `pykrx` loader that rejects non-daily intervals so the runner falls through.
+- **eToro connector** with path-separated demo/real profiles (#989); live
+  risk-increasing actions remain mandate-gated and audited.
+- **OpenBB Workspace bridge** (#817, thanks @shugaoye) — optional `openbb`
+  extra registering `/agents.json` + an authenticated `/v1/query`, each request
+  replaying the supplied history in an ephemeral session. `pro.openbb.co` is
+  not a default CORS origin; opt in via `VIBE_TRADING_EXTRA_CORS_ORIGINS`.
+- **Read-only Taiwan snapshot** tool (#848, thanks @TSENGCHIENFENG), registered
+  only when `VIBE_TW_STOCK_DB` points at a schema-valid snapshot.
+- **Options strategy analytics** (#946, rebuilt from #883, thanks @he-yufeng) —
+  analytic expiry P&L extrema, exact breakevens including continuous zero-P&L
+  intervals, engine-aligned entry commissions, and spot × IV scenarios through
+  Agent and MCP.
+- **Read-only `sentiment` tool** (#939, thanks @Robin1987China): local lexicon
+  scoring for arbitrary text plus the crypto Fear & Greed Index from
+  Alternative.me's free, no-auth API.
+- **Read-only `technical_indicators` tool** (#921, refs #920, thanks
+  @Robin1987China) — RSI/MACD/Bollinger/SMA/EMA through the existing loaders.
+- **Timezone-aware scheduled research** (#954, closes #953, thanks @ngoanpv):
+  jobs take an optional IANA `timezone` and evaluate cron on that zone's wall
+  clock, so a cadence survives DST — a spring-forward gap is skipped and a
+  fall-back ambiguous time runs once. Cron fields gain comma lists and ranges
+  (`1,3-5`); jobs without a timezone keep UTC semantics; the web UI gains a
+  **Scheduled** page in all five locales.
+- **`vibe-trading update`** (#1020) — checks PyPI for a newer release and
+  upgrades in place, installing the exact release it checked and verifying
+  fresh metadata without downgrading. Editable/source checkouts are detected
+  and answered with the right manual instruction (`git pull` + reinstall)
+  instead of a pip upgrade that would silently replace the dev install.
+- **ModelScope** joins the built-in providers through its official
+  OpenAI-compatible hosted-inference endpoint, default `Qwen/Qwen3.5-27B`
+  (#1011, thanks @honginp).
+- **Live model discovery** in Settings (#924, thanks @QCYTSN) — configured
+  providers are queried on demand with stable warning codes and five-locale
+  controls, and each reply records and reloads the immutable provider/model/
+  reasoning identity that actually served it.
+- **`alpha_zoo` + bounded `alpha_bench` on MCP** (#979, thanks @cgycorey) with
+  horizon/result/output-path limits and safe report creation; **QVeris**
+  discovery/inspect/execute also join the MCP surface (#976, closes #964,
+  thanks @shadowinlife), with the cost quote read from the marketplace instead
+  of trusted from the caller.
+- **The MCP surface grows to 70 tools.** Six read-only analytics tools that had
+  reached the agent but never MCP are now mirrored onto it: `quantlib_call`,
+  `cashflow_performance`, `orderbook_depth`, `sentiment`,
+  `technical_indicators` and `get_fundamentals`. Order-placing tools stay
+  structurally un-exposed — the mirrored registration path refuses any class
+  whose `is_readonly` is not `True`, so an order tool cannot reach MCP even if
+  someone adds it to the source list.
+- **Memory Tier 2: structural organization** (#815, thanks @shadowinlife) —
+  four independently-gated modules (H-MEM hierarchical routing
+  `VT_MEMORY_HIERARCHY`, A-MEM BM25 semantic linking `VT_MEMORY_LINKS`,
+  TF-IDF auto-compression `VT_MEMORY_COMPRESSION`, FTS5 index with CJK bigram
+  tokenization `VT_MEMORY_FTS_INDEX`), a one-line `VT_MEMORY=off|on|full`
+  preset replacing seven individual flags, dependency-conflict warnings, lazy
+  FTS5 rebuild on first search, and 9 integration + 23 benchmark tests. All
+  off by default (#733, closes #732).
+- **SDM lifecycle tools** `sdm_register` / `sdm_status` / `sdm_decay_scan`
+  (#457, thanks @shadowinlife) backed by a SQLite artifact store
+  (`UNIQUE(name, universe)`, WAL) and an IC/Sharpe decay state machine
+  (active → monitoring → decayed → disabled).
+- **`alpha bench --strict`** (#796, closes #773, thanks @he-yufeng) finally
+  wires the strict same-universe random-control + OOS gate that shipped
+  unreachable since 0.1.9; `alpha bench` also discloses CSI300/SP500 sources,
+  counts, degraded fallbacks and survivorship bias (#859, closes #845), with
+  the `_meta` disclosure forwarded to CLI/HTML (#841, closes #797, thanks
+  @AmirF194).
+- **Risk x-ray artifacts** (`risk_xray.json`/`.md`) emitted by every portfolio
+  backtest with headline concentration/vol/drawdown metrics (#900, thanks
+  @he-yufeng), plus rebalance-notes artifacts and turnover metrics (#795).
+- **Composable optimizer weight constraints** (#818, thanks @he-yufeng);
+  `calc_metrics` reports tracking error and benchmark beta.
+- Opt-in **atomic same-direction rebalancing** in backtests with immutable fill
+  evidence (#951), and opt-in `position_adjustment=rebalance` for strict USD-M
+  historical backtests preserving collateral, funding, fees, realized P&L,
+  liquidation behavior and fill evidence across increases and reductions
+  (#1019, thanks @honginp).
+- **USD-M perpetual realism**: `perpetual_strict` settles historical funding
+  before fills and executes isolated/cross margin breaches as real liquidations
+  (#903, #889, thanks @honginp), margin state contracts (#798), historical
+  funding rates actually consumed rather than fetched-and-ignored (#819, thanks
+  @g0rdonL), and ordered fill/funding/risk/liquidation event persistence plus a
+  fidelity summary (#936).
+- **Final report aggregator stage** for the `quant_strategy_desk` swarm preset
+  (#1048, thanks @Robin1987China).
+
+### Changed
+- **Rebuilt WebUI** — the guided-minimalism overhaul: no first-frame flash, one
+  durable activity object per turn with a live reasoning whisper and a
+  reload-safe tool trail, LLM-written session titles, full five-locale parity.
+- Sessions, runs, swarm runs and uploads now live under `~/.vibe-trading`
+  (relocatable via `VIBE_TRADING_HOME`) with a one-time automatic migration
+  (#925, closes #904, thanks @MuggleJinx).
+- The frontend moves to **Node 22 + React Router 8**, clearing a high-severity
+  advisory; Electron transitive advisories were patched separately.
+- Daily price bands are judged **at execution time** — from a pre-fill base
+  price against the prospective fill price — never from the decision bar's own
+  close (#676, thanks @tyj147454413-cmd).
+- A session runs **one attempt at a time** (a second concurrent send is refused
+  with HTTP 409), and a user stop is its own terminal state distinct from a
+  failure, both live and on reload.
+- Trace redaction is now **sink-aware**: `content` is released only in the
+  tool-RESULT sink and stays redacted in the fail-closed ARGUMENTS sink used by
+  tool-call arguments and the live audit ledger (`env` is never released);
+  results also get their string leaves pattern-scrubbed (#675, #913, #911,
+  thanks @santhreal). Trace records are fsynced and sidecars made durable
+  before the record that references them (#662).
+- Oversized tool results are paged by whole record with an explicit total
+  instead of being cut mid-JSON; the system prompt drops redundant tool prose.
+- Dependency locks refreshed and verified across Python and the frontend
+  (#949, #948, #850–#852, #1021, #1023, #1026, #1027); the breaking MCP 2.0
+  bump remains unmerged pending a complete lock/runtime migration (#950).
+
+### Fixed
+- **The identity/grounding gate stops refusing answers it has the evidence
+  for.** This was the single most user-visible defect in the 0.1.12 line — a
+  well-formed run would spend minutes on real tool calls and then return
+  *"cannot safely confirm instrument identity or price evidence"*. Root causes,
+  each fixed and covered by two-sided guard tests:
+  - `.SS` and `.SH` were treated as different instruments, so **every Shanghai
+    ticker was permanently ambiguous**. Symbols are now canonicalized
+    (`.SS`≡`.SH`, `sh600519`≡`600519.SH`, `700.HK`≡`00700.HK`,
+    `BTC/USDT`≡`BTC-USDT`) before comparison, and candidates are collapsed by
+    canonical symbol before the ambiguity test.
+  - A **failed side query could demote an already-locked identity**; aggregate
+    status now keeps a lock unless something genuinely conflicts.
+  - Yahoo returns HTTP 400 for every CJK query, which was recorded as a source
+    *failure* and escalated to blocking `invalidated`. Non-ASCII queries are
+    now declined up front with an explicit skip marker, and a resolution with
+    clean sources and no failures resolves to `not_found` rather than
+    `invalidated`. All resolver skip markers were unified on one prefix, with a
+    cross-module contract test.
+  - A hardcoded per-tool whitelist decided which bare tickers could be matched,
+    blocking 11 of the 17 documented argument spellings; matching is now by
+    uniqueness against the authorized set.
+  - Chinese-language answers were rejected for writing `雅虎`/`腾讯` instead of
+    the ASCII loader name, and `元` instead of `人民币`. Source and currency
+    aliases now cover the user's language.
+  - Thousands separators split a clause mid-number, so `¥1,309.22` was compared
+    as `1` against the observed range and reported as a price conflict.
+  - Conceptual questions with no instrument at all, and comparison reports,
+    were dead-ended by the gate.
+  - Follows the narrower 0.1.12-line fixes for numbers that were never prices —
+    confidence scores, indicator readings, moving-average windows, year-less
+    dates like `8/5`, percentage ranges, and a plan's own trigger levels
+    (`close ≥ 6.45` is a condition, not a quote) (#1001, #983, #955) — and a
+    many-candidate shortlist now counts as an answer rather than a stalled
+    resolution. A quote outside recorded OHLC evidence is **still refused**.
+  - Ordering, evidence and serialization repairs from the same family: a
+    canonical symbol/venue must be locked before a market-sensitive tool-call
+    batch starts so a resolver and its consumer cannot race (#887/#886); tool
+    envelopes with `ok: false` / `success: false` are no longer recorded as
+    successful calls; NaN/inf volume and close no longer crash
+    `format_grounding_block` (#1043, thanks @santhreal); the latest close is
+    paired with its correct date; and bash-written run-dir OHLC CSVs count as
+    observed evidence (#1037, thanks @wiliao).
+- **Sandbox gap closed**: generated strategy code can no longer import the
+  broker layer, nor reach `socket`/`subprocess`/`os.system`/`ctypes` through a
+  renamed binding — both were accepted before. `src.quantlib` still imports.
+- **SEC reporting periods are keyed on their `(start, end)` span.** A 10-Q files
+  the true quarter and the year-to-date frame under the same end date and
+  fiscal period, so `period="annual"` had been returning a single quarter for
+  AAPL FY2018–2020 (a 4.2× understatement) and every fiscal-Q4 slot in a
+  quarterly series carried the full-year figure. `get_fundamentals("AAPL.US")`
+  no longer answers `ok:true` with an all-null panel. PIT fundamentals also
+  dedup restated rows and stop the snapshot regressing to an older fiscal
+  period on a late restatement (#772, closes #771, thanks @klmtseng).
+- **Tushare A-share prices are corporate-action adjusted** in both the factor
+  bench and backtests — a raw close-to-close return across an ex-date was off
+  by up to 47 percentage points (300750.SZ, 2023-04-26) — and the CSI300 bench
+  masks each date to its point-in-time index membership.
+- Cross-market composite backtests **refuse a mixed-currency code set** instead
+  of summing CNY, USD and KRW into one equity curve; Shadow splits mixed
+  markets by settlement currency without invented FX aggregation (#997).
+- Option legs are marked at the volatility they were opened at, removing a
+  fabricated day-zero P&L of up to +93% of premium; options **partial-close**
+  honors the requested quantity instead of flattening the lot.
+- `bar_returns` no longer erases the real move across a trading halt longer
+  than the forward-fill window — the resumption move was silently recorded as
+  0, understating volatility and inflating Sharpe — and an `inf` prior price
+  can no longer read as a clean −100% (#895, thanks @darkknight4563).
+  Buy-and-hold returns are sign-safe (#872), the rolling correlation matrix no
+  longer forward-fills missing closes (#873, thanks @ddy4633), indicators use
+  consecutive unsampled history (#1005), negative-equity drawdown and empty
+  insolvent cross accounts are handled (#958, #959), and `inf` from
+  `pct_change` on zero equity is replaced (#1041, thanks @santhreal).
+- **Annualisation now covers all 24 data sources** at every interval, with a
+  coverage test that fails CI when a loader lands without entries (#891, closes
+  #884, thanks @Robin1987China). A 19-PR **interval-normalization sweep**
+  accepts lowercase `1h/4h/1d/1w` everywhere, fails fast on unsupported
+  intervals instead of silently returning daily bars, maps Yahoo `4H`→`1h`, and
+  keeps `1H`/`4H` as hour bars across the Tiger/Alpaca/OKX/Shoonya/Longbridge
+  connectors (#812–#838, #778–#794, thanks @santhreal); lowercase `4h` returns
+  true four-hour bars (#1013).
+- **Market-data routing**: partial results complete the missing symbols through
+  the fallback chain and fail closed instead of silently shrinking the backtest
+  universe (#689, closes #681, thanks @xkam7ar); HK fallback routing repaired
+  with a new Tencent HK source (#1000); yfinance crypto routes to the crypto
+  engine (#970); OKX bars use `history-candles` with rate-limit retry (#644);
+  a Binance loader joins the crypto fallback chain (#643).
+- **Providers**: Claude models that deprecate `temperature` (opus-4-7, opus-5,
+  sonnet-5) work — the adapter drops the field when the API rejects it, retries
+  once, and remembers the model, so no per-release patch is needed (#890,
+  closes #856, thanks @yagnikpipaliya). The whole Kimi K-series auto-forces
+  `temperature=1` (#701, thanks @sambazhu); endpoint resolution falls back to
+  each provider's canonical base URL; mapping-shaped Responses stream events are
+  accepted (#1034, thanks @cgycorey); OpenAI Codex OAuth gets a separate
+  synchronized credential store and one-shot 401 recovery (#1014); proxy opt-out
+  covers sync and async clients (#995); long model slugs stay readable (#1006).
+- **MCP**: dataclass results no longer crash on a false
+  `Circular reference detected` (#849, #922, thanks @Echoandelementwebsites);
+  `factor_analysis` is realigned to the registered tool's real CSV contract so
+  calls no longer die on `KeyError` (#715, closes #635, thanks
+  @Robin1987China); list/dict arguments tolerate JSON-string clients (#993);
+  the network guard accepts IPv6 and case-variant hosts (#750); the specs cache
+  key includes remote server identity (#1049, thanks @Shizoqua); nested results
+  serialize cleanly.
+- **Swarm**: `ok:false` / `success:false` tool failures are detected, not just
+  `status:error` (#1028, thanks @Shizoqua); MCP discovery is cached (#704).
+- **Scheduled research** isolates malformed records (#1003), fixes
+  interval-timezone validation (#1004), and retries transient dispatch failures
+  with capped exponential backoff.
+- **Memory**: entries are written and recovered with their `.md` suffix (#984);
+  FTS5 ranking applies importance decay (#1032, thanks @Shizoqua); exact
+  index-anchor matching and a respected result bound (#956, #957, thanks
+  @santhreal).
+- **Two quantlib modules were allowlisted but unreachable.** `attribution`
+  (Brinson-Fachler) and `impact` (market-impact models) carried no `__all__`,
+  and `quantlib_call` dispatches on `__all__` alone, so the tool listed **zero**
+  functions for both while the package docstring advertised them. Both now
+  export, and a guard test fails when any allowlisted module exposes nothing —
+  the previous test only asserted each module *imports*, which could never
+  catch this.
+- **The published MCP manifest under-reported the server.** `SKILL.md`'s tool
+  count was derived by counting `@mcp.tool` decorators, which ignores every
+  tool registered through the mirrored path — so four institutional-research
+  tools were live over MCP and absent from the manifest, and the contract test
+  asserted that absence was *correct*. Both tests now measure
+  `mcp.list_tools()`.
+- **Resource leaks and robustness**: the HTTP throttle sweeps stale bucket
+  entries interval-aware, preserving rate-limit spacing (#1047), the rate
+  limiter no longer grows unboundedly with unique client IPs (#1039), the
+  event bus notifies and removes subscribers on clear (#1046), `_json_loads`
+  is guarded against corrupted JSON in database columns (#1045), and Shoonya
+  tolerates empty-string numeric fields (#1038) — all thanks @santhreal.
+- **Connectors**: the `connector` CLI loads `~/.vibe-trading/.env` so
+  env-sourced broker credentials resolve again (#902, closes #901, thanks
+  @MuggleJinx); IBKR moves to a thread-local connection pool with snapshot
+  quotes, fixing hangs under parallel agent runs (#636, thanks @MikeCer); MT5
+  `trading_history` coerces numpy scalars so JSON serialization no longer dies
+  on `int64` (#776, closes #774, thanks @shadowinlife); CLI balances show a
+  real account label (#843, closes #846).
+- **Docker's hash-locked install works again** with a new CI lock check (#858,
+  closes #847), and saving Agent LLM settings from the Web UI no longer returns
+  HTTP 500 on Windows — the POSIX-only `os.fchmod` hardening is platform-guarded
+  (#561, thanks @CRui5in).
+- Non-interactive `vibe-trading run` injects a host session id: research-goal
+  tools previously failed on every call while the run still reported success
+  (#885). The agent now stops when evidence is sufficient (#1010).
+- The **vn.py export** skill is repaired for the vn.py 4.x layout, where
+  `vnpy.app.cta_strategy` no longer exists upstream — templates import from
+  `vnpy_ctastrategy` (#869, thanks @y85998607).
+- An **encoding and parsing batch**: UTF-16 BOM decoding in the document reader
+  and trade-journal CSVs, currency symbols stripped before numeric coercion,
+  `BTCUSDT`-style symbols inferred as crypto, CJK characters preserved in skill
+  directory slugs, Eastmoney/Futu/Tonghuashun Excel-serial dates normalized,
+  blank/NaN symbol rows skipped, and skill frontmatter parsed at EOF
+  (#862–#868, #811, #749, #861, thanks @santhreal and @Robin1987China).
+- QQ replies retain source message IDs (#1008); Feishu/CLI markdown table edges
+  and indent-preserving channel message splits are fixed (#867).
+- The daily-bar validator can opt in to **non-positive prices** — opening on
+  negative bars while still rejecting zero (#816, closes #571, thanks
+  @darkknight4563).
+- Sandboxed runs retain their canonical root (#1012, #1017); persisted run
+  state is fsync-durable (#645); Portfolio Studio artifacts are surfaced in run
+  detail (#980, #982, #966, #973).
 
 ## [0.1.12] — 2026-07-22
 

@@ -63,10 +63,18 @@ class TestTokenize:
         assert "world" in tokens
         assert "testing" in tokens
 
-    def test_short_words_excluded(self) -> None:
-        tokens = _tokenize("I am ok no")
-        # All < 3 chars, should be excluded
+    def test_single_char_words_excluded(self) -> None:
+        tokens = _tokenize("I a")
+        # Single ASCII chars carry no discriminating value, should be excluded
         assert len(tokens) == 0
+
+    def test_two_char_words_included(self) -> None:
+        # Regression: the fallback token-scan used a 3-char minimum while
+        # search_index.py's FTS5 sanitizer used 2 chars, so short tokens like
+        # ticker symbols ("GE") or country codes ("US") were retrievable via
+        # FTS but silently invisible whenever VT_MEMORY_FTS_INDEX was off.
+        tokens = _tokenize("GE US ok no")
+        assert tokens == {"ge", "us", "ok", "no"}
 
     def test_cjk_characters(self) -> None:
         tokens = _tokenize("比特币价格分析")
@@ -215,6 +223,67 @@ class TestAdd:
         assert len(results) == 1
         assert results[0].title == "人民币汇率"
 
+    def test_update_index_exact_title_match(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(memory_dir=tmp_path)
+        pm.add("Ref", "referencing main", "project", description="See details in [Main]")
+        pm.add("Main", "main content", "project", description="Main memory entry")
+        index_content = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+        lines = [line for line in index_content.splitlines() if line.strip()]
+        assert len(lines) == 2
+        assert any(line.startswith("- [Ref](") for line in lines)
+        assert any(line.startswith("- [Main](") for line in lines)
+
+    def test_hierarchy_routed_entry_stays_scannable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Regression: with VT_MEMORY_HIERARCHY enabled, add() used to hand the
+        # bare slug to MemoryHierarchy.route_entry(), which treats its argument
+        # as the leaf filename verbatim — the entry was written without the
+        # .md extension and scan_all() (suffix == ".md" filter) could not see
+        # it, so the memory vanished from list_entries()/find().
+        monkeypatch.setenv("VT_MEMORY_HIERARCHY", "1")
+        pm = PersistentMemory(memory_dir=tmp_path)
+        path = pm.add("routed-mem", "body text", "project", description="routed")
+        assert path.suffix == ".md"
+        assert path.parent.name == "project"
+        entries = pm.list_entries()
+        assert len(entries) == 1
+        assert entries[0].title == "routed-mem"
+        assert pm.find("routed-mem") is not None
+
+    def test_recovered_orphan_and_new_write_agree_on_the_same_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The write path and the orphan recovery must name entries identically.
+
+        ``recover_extensionless_entries`` renames an orphan by appending the
+        missing suffix, so it produces ``<category>/<slug>.md``. If the write
+        path is ever changed to a different convention, the same logical entry
+        exists twice — once under the recovered name, once under the new one —
+        and both show up in ``list_entries()``. This pins the agreement rather
+        than the spelling: it asks the two code paths for the same entry and
+        requires one file.
+        """
+        from src.memory.hierarchy import MemoryHierarchy
+
+        monkeypatch.setenv("VT_MEMORY_HIERARCHY", "1")
+        category = tmp_path / "project"
+        category.mkdir()
+        orphan = category / "shared-slug"
+        orphan.write_text(
+            "---\nname: shared-slug\ndescription: d\nmetadata:\n  type: project\n---\n\nold\n",
+            encoding="utf-8",
+        )
+        recovered = MemoryHierarchy(tmp_path).recover_extensionless_entries()
+        assert len(recovered) == 1
+
+        written = PersistentMemory(memory_dir=tmp_path).add(
+            "shared-slug", "new body", "project", description="d",
+        )
+
+        assert written == recovered[0]
+        assert sorted(p.name for p in category.iterdir()) == ["shared-slug.md"]
+
 
 # ---------------------------------------------------------------------------
 # PersistentMemory.find_relevant
@@ -248,6 +317,19 @@ class TestFindRelevant:
             pm.add(f"stock-{i}", f"stock analysis number {i}", "project", description=f"stock {i}")
         results = pm.find_relevant("stock analysis", max_results=3)
         assert len(results) == 3
+
+    def test_max_results_with_semantic_links(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VT_MEMORY_LINKS", "true")
+        pm = PersistentMemory(memory_dir=tmp_path)
+        p1 = pm.add("stock-0", "stock analysis zero", "project", description="stock zero")
+        p2 = pm.add("stock-1", "stock analysis one", "project", description="stock one")
+        p3 = pm.add("stock-2", "stock analysis two", "project", description="stock two")
+        assert p1 is not None and p2 is not None and p3 is not None
+        from src.memory.semantic_links import SemanticLinker
+        linker = SemanticLinker(tmp_path)
+        linker.save_relations(p1, [(str(p3), 0.95)])
+        results = pm.find_relevant("stock analysis", max_results=2)
+        assert len(results) == 2
 
     def test_metadata_weighted_higher(self, tmp_path: Path) -> None:
         pm = PersistentMemory(memory_dir=tmp_path)

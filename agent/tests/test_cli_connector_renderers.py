@@ -8,6 +8,7 @@ Longbridge (and other ``broker_sdk`` connectors) return ``quantity``/``cost_pric
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -90,3 +91,62 @@ def test_connector_account_still_handles_ibkr_summary(capsys) -> None:
     out = capsys.readouterr().out
     assert "NetLiquidation" in out
     assert "50000" in out
+
+
+def test_connector_account_renders_direct_sdk_account_mapping(capsys) -> None:
+    alpaca_account = {
+        "status": "ok",
+        "profile_id": "alpaca-paper-trade",
+        "profile": "paper",
+        "account": {
+            "account_number": "PA123",
+            "status": "AccountStatus.ACTIVE",
+            "currency": "USD",
+            "cash": "100000",
+            "equity": "100000",
+            "buying_power": "400000",
+            "pattern_day_trader": False,
+            "trading_blocked": False,
+        },
+    }
+
+    rc = _legacy._print_connector_account(alpaca_account)
+
+    assert rc == _legacy.EXIT_SUCCESS
+    out = capsys.readouterr().out
+    assert "No account summary returned." not in out
+    assert "PA123" in out
+    assert "USD" in out
+    assert "buying_power" in out
+    assert "400000" in out
+    assert "trading_blocked" in out
+    assert "False" in out
+
+
+def test_connector_check_uses_sdk_diagnostics_without_oauth_rows(capsys) -> None:
+    profile = SimpleNamespace(
+        id="alpaca-paper-trade",
+        connector="alpaca",
+        environment="paper",
+        transport="broker_sdk",
+    )
+    report = {
+        "status": "ok",
+        "sdk": {"package": "alpaca-py", "installed": True},
+        "tap": False,
+    }
+
+    with (
+        patch("cli._legacy._selected_profile_or", return_value=profile),
+        patch("src.trading.service.check_connection", return_value=report),
+    ):
+        rc = _legacy.cmd_connector_check("alpaca-paper-trade")
+
+    assert rc == _legacy.EXIT_SUCCESS
+    out = capsys.readouterr().out
+    assert "Connector profile is ready." in out
+    assert "alpaca-py" in out
+    assert "installed" in out
+    assert "OAuth token" not in out
+    assert "Configured" not in out
+    assert "Capabilities" not in out

@@ -51,6 +51,136 @@ def test_market_data_json_accepts_explicit_longbridge_source():
     assert seen == [(["AAPL.US"], "2026-01-01", "2026-01-02", "1D")]
 
 
+def test_market_data_json_can_include_actual_source_provenance():
+    """Agent-facing payloads expose fallback/source and conversion status (#886)."""
+    idx = pd.date_range("2026-01-01", periods=1, freq="D")
+    idx.name = "trade_date"
+    df = pd.DataFrame(
+        {
+            "open": [1.0],
+            "high": [1.1],
+            "low": [0.9],
+            "close": [1.05],
+            "volume": [100],
+        },
+        index=idx,
+    )
+
+    class _FallbackLoader:
+        def fetch(self, codes, start, end, interval="1D"):
+            return {codes[0]: df}
+
+    def _resolver(source: str):
+        if source == "yahoo":
+            raise RuntimeError("primary unavailable")
+        return _FallbackLoader
+
+    payload = json.loads(
+        fetch_market_data_json(
+            codes=["AAPL.US"],
+            start_date="2026-01-01",
+            end_date="2026-01-02",
+            source="yahoo",
+            loader_resolver=_resolver,
+            fallback_chain_provider=lambda source: ["yahoo", "yfinance"],
+            include_provenance=True,
+        )
+    )
+
+    assert payload["_provenance"]["AAPL.US"] == {
+        "source": "yfinance",
+        "requested_source": "yahoo",
+        "detected_source": "yahoo",
+        "fallback_used": True,
+        "currency_conversion": "none",
+        "volume_unit": None,
+    }
+
+
+def test_market_data_provenance_exposes_declared_volume_unit():
+    """Serving loaders declare per-market volume units (#1062)."""
+    idx = pd.date_range("2026-01-01", periods=1, freq="D")
+    idx.name = "trade_date"
+    df = pd.DataFrame(
+        {
+            "open": [1.0],
+            "high": [1.1],
+            "low": [0.9],
+            "close": [1.05],
+            "volume": [100],
+        },
+        index=idx,
+    )
+
+    class _UnitAwareLoader:
+        volume_units = {"a_share": "lots", "hk_equity": "shares"}
+
+        def fetch(self, codes, start, end, interval="1D"):
+            return {code: df for code in codes}
+
+    payload = json.loads(
+        fetch_market_data_json(
+            codes=["600519.SH", "0700.HK"],
+            start_date="2026-01-01",
+            end_date="2026-01-02",
+            source="tencent",
+            loader_resolver=lambda source: _UnitAwareLoader,
+            include_provenance=True,
+        )
+    )
+
+    assert payload["_provenance"]["600519.SH"]["volume_unit"] == "lots"
+    assert payload["_provenance"]["0700.HK"]["volume_unit"] == "shares"
+
+
+def test_market_data_provenance_volume_unit_follows_serving_loader():
+    """After fallback, the unit comes from the loader that actually served."""
+    idx = pd.date_range("2026-01-01", periods=1, freq="D")
+    idx.name = "trade_date"
+    df = pd.DataFrame(
+        {
+            "open": [1.0],
+            "high": [1.1],
+            "low": [0.9],
+            "close": [1.05],
+            "volume": [100],
+        },
+        index=idx,
+    )
+
+    class _PrimaryLoader:
+        volume_units = {"a_share": "lots"}
+
+        def fetch(self, codes, start, end, interval="1D"):
+            raise RuntimeError("primary unavailable")
+
+    class _FallbackLoader:
+        volume_units = {"a_share": "shares"}
+
+        def fetch(self, codes, start, end, interval="1D"):
+            return {codes[0]: df}
+
+    def _resolver(source: str):
+        return _PrimaryLoader if source == "tencent" else _FallbackLoader
+
+    payload = json.loads(
+        fetch_market_data_json(
+            codes=["600519.SH"],
+            start_date="2026-01-01",
+            end_date="2026-01-02",
+            source="tencent",
+            loader_resolver=_resolver,
+            fallback_chain_provider=lambda source: ["tencent", "baostock"],
+            include_provenance=True,
+        )
+    )
+
+    prov = payload["_provenance"]["600519.SH"]
+    assert prov["source"] == "baostock"
+    assert prov["fallback_used"] is True
+    assert prov["volume_unit"] == "shares"
+
+
 def test_market_data_json_is_strict_when_loader_returns_nan():
 
     idx = pd.date_range("2026-01-01", periods=1, freq="D")

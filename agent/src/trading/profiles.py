@@ -17,6 +17,7 @@ from src.trading.connectors.okx.profiles import OKX_PROFILES
 from src.trading.connectors.robinhood.profiles import ROBINHOOD_PROFILES
 from src.trading.connectors.shoonya.profiles import SHOONYA_PROFILES
 from src.trading.connectors.tiger.profiles import TIGER_PROFILES
+from src.trading.connectors.etoro.profiles import ETORO_PROFILES
 from src.trading.connectors.trading212.profiles import TRADING212_PROFILES
 from src.trading.types import TradingProfile
 
@@ -36,6 +37,7 @@ BUILTIN_PROFILES: tuple[TradingProfile, ...] = (
     *SHOONYA_PROFILES,
     *TRADING212_PROFILES,
     *MT5_PROFILES,
+    *ETORO_PROFILES,
 )
 
 

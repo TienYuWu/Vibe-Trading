@@ -50,4 +50,12 @@ CLAUDE.md
 CONTRIBUTING.md
 /*.md
 !README.md
+# The translated READMEs are needed ONLY by the `test` stage, which runs
+# test_readme_counts.py against all five. They stay out of the runtime image:
+# its COPY names README.md explicitly, so un-ignoring these adds them to the
+# build context without shipping them.
+!README_ar.md
+!README_ja.md
+!README_ko.md
+!README_zh.md
 !LICENSE

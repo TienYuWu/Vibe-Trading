@@ -32,6 +32,61 @@ _DEFAULT_LOOKBACK = 200
 _MAX_LOOKBACK = 500
 
 
+_CLOSE_KEYS = ("close", "Close", "CLOSE", "adj_close")
+_DATE_KEYS = ("trade_date", "date", "datetime", "timestamp", "time")
+
+
+def _extract_close_series(payload: Any) -> pd.Series | None:
+    """Extract the close-price series from a loader payload.
+
+    Loader results can be a ``DataFrame``, a plain column mapping, or the
+    ``list[dict]`` shape returned by :func:`fetch_market_data`. Preserve a real
+    date index when one is available; a payload without dates intentionally
+    keeps a ``RangeIndex`` so callers do not report a row number as a date.
+    """
+    if isinstance(payload, list):
+        if not payload or not isinstance(payload[0], dict):
+            return None
+        frame = pd.DataFrame(payload)
+    elif isinstance(payload, dict):
+        inner = payload.get("data")
+        if isinstance(inner, list):
+            return _extract_close_series(inner)
+        try:
+            frame = pd.DataFrame(payload)
+        except ValueError:
+            return None
+    elif isinstance(payload, pd.DataFrame):
+        frame = payload.copy()
+    else:
+        return None
+
+    close_key = next((key for key in _CLOSE_KEYS if key in frame.columns), None)
+    if close_key is None:
+        return None
+
+    close = pd.to_numeric(frame[close_key], errors="coerce")
+    date_key = next((key for key in _DATE_KEYS if key in frame.columns), None)
+    if date_key is not None:
+        dates = pd.to_datetime(frame[date_key], errors="coerce")
+    elif isinstance(frame.index, pd.DatetimeIndex):
+        dates = pd.Series(frame.index, index=frame.index)
+    elif not isinstance(frame.index, pd.RangeIndex) and not pd.api.types.is_integer_dtype(
+        frame.index.dtype
+    ):
+        dates = pd.Series(pd.to_datetime(frame.index, errors="coerce"), index=frame.index)
+    else:
+        return close.dropna().reset_index(drop=True).astype(float)
+
+    valid = close.notna() & dates.notna()
+    normalized = pd.Series(
+        close.loc[valid].to_numpy(dtype=float),
+        index=pd.DatetimeIndex(dates.loc[valid]),
+        dtype=float,
+    )
+    return normalized.sort_index(kind="stable")
+
+
 def _compute_sma(close: pd.Series, period: int) -> float | None:
     """Simple moving average over the last *period* bars."""
     if len(close) < period:
@@ -47,14 +102,21 @@ def _compute_ema(close: pd.Series, period: int) -> float | None:
 
 
 def _compute_rsi(close: pd.Series, period: int = _RSI_PERIOD) -> float | None:
-    """Relative Strength Index (Wilder smoothing) over *period* bars."""
+    """Relative Strength Index (Wilder smoothing) over *period* bars.
+
+    Matches the Wilder-EWM convention already used for RSI elsewhere in this
+    codebase (``shadow_account/extractor.py``, ``shadow_account/scanner.py``,
+    ``skills/technical-basic/example_signal_engine.py``): a plain rolling mean
+    of gains/losses is a materially different, non-Wilder technique and used
+    to diverge from those siblings by several RSI points on ordinary data.
+    """
     if len(close) < period + 1:
         return None
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = (-delta).clip(lower=0)
-    avg_gain = gain.rolling(window=period).mean().iloc[-1]
-    avg_loss = loss.rolling(window=period).mean().iloc[-1]
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean().iloc[-1]
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean().iloc[-1]
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -166,30 +228,35 @@ class TechnicalIndicatorTool(BaseTool):
                 start_date=start_date,
                 end_date=end_date,
                 interval=interval,
-                max_rows=lookback,
+                # Indicators require consecutive bars. ``max_rows=lookback``
+                # would make the shared helper even-stride sample long windows.
+                max_rows=0,
             )
         except Exception as exc:
             logger.debug("fetch_market_data failed for %s: %s", symbol, exc)
             return json.dumps({"ok": False, "error": f"Failed to fetch data: {exc}"})
 
         df = data.get(symbol)
-        if df is None or df.empty:
+        if df is None:
             return json.dumps({"ok": False, "error": f"No data returned for {symbol}"})
+        if isinstance(df, pd.DataFrame) and df.empty:
+            return json.dumps({"ok": False, "error": f"No data returned for {symbol}"})
+        if isinstance(df, list) and not df:
+            return json.dumps({"ok": False, "error": f"No data returned for {symbol}"})
+        if isinstance(df, dict) and not df:
+            return json.dumps({"ok": False, "error": f"No data returned for {symbol}"})
+        if isinstance(df, dict) and df.get("truncated") is True:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "Indicator calculation requires consecutive, untruncated bars",
+                }
+            )
 
-        close = df.get("close") if isinstance(df, pd.DataFrame) else None
-        if close is None:
-            # Some loaders return a dict-like structure; try common key names.
-            if hasattr(df, "to_dict"):
-                d = df.to_dict() if callable(df.to_dict) else dict(df)
-                for key in ("close", "Close", "CLOSE", "adj_close"):
-                    if key in d:
-                        close = pd.Series(d[key])
-                        break
-        if close is None:
+        close = _extract_close_series(df)
+        if close is None or close.empty:
             return json.dumps({"ok": False, "error": "No close price column in data"})
-
-        if not isinstance(close, pd.Series):
-            close = pd.Series(close)
+        close = close.sort_index(kind="stable").tail(lookback)
 
         # ── Compute indicators ────────────────────────────────────────────
         indicators: dict[str, Any] = {
@@ -202,7 +269,11 @@ class TechnicalIndicatorTool(BaseTool):
         indicators[f"ema_{_EMA_PERIOD}"] = _compute_ema(close, _EMA_PERIOD)
 
         latest_close = float(close.iloc[-1]) if len(close) > 0 else None
-        latest_date = str(close.index[-1])[:10] if hasattr(close, "index") and len(close) > 0 else None
+        latest_date = (
+            str(close.index[-1])[:10]
+            if isinstance(close.index, pd.DatetimeIndex) and len(close) > 0
+            else None
+        )
 
         return json.dumps(
             {

@@ -254,13 +254,13 @@ def get_positions(config: ShoonyaConfig | None = None) -> dict[str, Any]:
             "symbol": item.get("tsym", ""),
             "exchange": item.get("exch", ""),
             "product_type": item.get("prd", ""),
-            "quantity": int(item.get("netqty", 0)),
-            "average_cost": float(item.get("netavgprc", 0)),
-            "ltp": float(item.get("lp", 0)),
-            "unrealized_pnl": float(item.get("urmtom", 0)),
-            "realized_pnl": float(item.get("rpnl", 0)),
-            "day_buy_qty": int(item.get("daybuyqty", 0)),
-            "day_sell_qty": int(item.get("daysellqty", 0)),
+            "quantity": _to_int(item.get("netqty", 0)),
+            "average_cost": _to_float(item.get("netavgprc", 0)),
+            "ltp": _to_float(item.get("lp", 0)),
+            "unrealized_pnl": _to_float(item.get("urmtom", 0)),
+            "realized_pnl": _to_float(item.get("rpnl", 0)),
+            "day_buy_qty": _to_int(item.get("daybuyqty", 0)),
+            "day_sell_qty": _to_int(item.get("daysellqty", 0)),
         })
 
     return {
@@ -328,14 +328,14 @@ def get_quote(
         "symbol": clean,
         "exchange": exchange,
         "quote": {
-            "ltp": float(quote.get("lp", 0)),
-            "open": float(quote.get("o", 0)),
-            "high": float(quote.get("h", 0)),
-            "low": float(quote.get("l", 0)),
-            "close": float(quote.get("c", 0)),
-            "volume": int(quote.get("v", 0)),
-            "bid": float(quote.get("bp1", 0)),
-            "ask": float(quote.get("sp1", 0)),
+            "ltp": _to_float(quote.get("lp", 0)),
+            "open": _to_float(quote.get("o", 0)),
+            "high": _to_float(quote.get("h", 0)),
+            "low": _to_float(quote.get("l", 0)),
+            "close": _to_float(quote.get("c", 0)),
+            "volume": _to_int(quote.get("v", 0)),
+            "bid": _to_float(quote.get("bp1", 0)),
+            "ask": _to_float(quote.get("sp1", 0)),
         },
     }
 
@@ -397,11 +397,11 @@ def get_historical_bars(
     for item in _as_list(data):
         bars.append({
             "time": item.get("time", item.get("ssboe", "")),
-            "open": float(item.get("into", item.get("o", 0))),
-            "high": float(item.get("inth", item.get("h", 0))),
-            "low": float(item.get("intl", item.get("l", 0))),
-            "close": float(item.get("intc", item.get("c", 0))),
-            "volume": int(item.get("intv", item.get("v", 0))),
+            "open": _to_float(item.get("into", item.get("o", 0))),
+            "high": _to_float(item.get("inth", item.get("h", 0))),
+            "low": _to_float(item.get("intl", item.get("l", 0))),
+            "close": _to_float(item.get("intc", item.get("c", 0))),
+            "volume": _to_int(item.get("intv", item.get("v", 0))),
         })
 
     return {
@@ -611,6 +611,32 @@ def _public_config(cfg: ShoonyaConfig) -> dict[str, Any]:
     return data
 
 
+def _to_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a Shoonya API field to float, tolerating empty strings.
+
+    Shoonya frequently returns ``""`` for unset numeric fields (e.g. ``netavgprc``,
+    ``lp``). ``float("")`` raises ``ValueError``, so a bare ``float(item.get(k, 0))``
+    crashes when the key is present but empty — the ``.get`` default only fires on
+    a missing key, not an empty value.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    """Coerce a Shoonya API field to int, tolerating empty strings (see ``_to_float``)."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -626,9 +652,9 @@ def _order_to_dict(item: Any) -> dict[str, Any]:
         "exchange": item.get("exch", ""),
         "side": "buy" if item.get("trantype") == "B" else "sell",
         "order_type": item.get("prctyp", "").lower(),
-        "quantity": int(item.get("qty", 0)),
-        "filled_qty": int(item.get("fillshares", 0)),
-        "price": float(item.get("prc", 0)),
+        "quantity": _to_int(item.get("qty", 0)),
+        "filled_qty": _to_int(item.get("fillshares", 0)),
+        "price": _to_float(item.get("prc", 0)),
         "status": item.get("status", ""),
         "product_type": item.get("prd", ""),
     }

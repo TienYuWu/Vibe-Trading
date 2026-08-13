@@ -62,6 +62,8 @@ class TestInferMarket:
         assert infer_market("830799.BJ") == "a_share"
         assert infer_market("AAPL.US") == "us_equity"
         assert infer_market("9988.HK") == "hk_equity"
+        assert infer_market("TD.TO") == "ca_equity"
+        assert infer_market("PNG.V") == "ca_equity"
 
 
 class TestNormalizeSymbol:
@@ -81,6 +83,7 @@ class TestNormalizeSymbol:
         assert _normalize_symbol("AAPL.US", "us_equity") == "AAPL.US"
         assert _normalize_symbol("600000.SH", "a_share") == "600000.SH"
         assert _normalize_symbol("0700.HK", "hk_equity") == "0700.HK"
+        assert _normalize_symbol("TD.TO", "ca_equity") == "TD.TO"
 
     def test_crypto_passes_through(self):
         assert _normalize_symbol("BTC-USDT", "crypto") == "BTC-USDT"

@@ -204,10 +204,14 @@ def _drawdown(port: pd.Series) -> dict[str, Any]:
     if port.empty:
         return {"max_drawdown": None, "max_drawdown_start": None, "max_drawdown_trough": None}
     equity = (1.0 + port).cumprod()
-    peak = equity.cummax()
-    dd = equity / peak - 1.0
+    # The portfolio starts at wealth 1 before the first return observation.
+    # Keeping that initial high-water mark also preserves the drawdown sign
+    # after a sub -100% return sends compounded wealth through zero.
+    peak = equity.cummax().clip(lower=1.0)
+    dd = (equity - peak) / peak
     trough_idx = dd.idxmin()
-    start_idx = equity.loc[:trough_idx].idxmax()
+    pre_trough = equity.loc[:trough_idx]
+    start_idx = port.index[0] if float(pre_trough.max()) < 1.0 else pre_trough.idxmax()
     return {
         "max_drawdown": _finite(float(dd.loc[trough_idx])),
         "max_drawdown_start": str(start_idx),

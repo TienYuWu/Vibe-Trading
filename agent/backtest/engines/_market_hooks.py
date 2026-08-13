@@ -36,13 +36,21 @@ _MARKET_PATTERNS = [
     # alphanumerics (0050.TW, 00632R.TW).
     (re.compile(r"^[0-9][0-9A-Z]{3,5}\.(TW|TWO)$", re.I), "tw_equity"),
     # TAIFEX index futures. Must precede the global-futures patterns below,
-    # which would otherwise claim ``TXF2608`` via ^[A-Z]{2,4}\d{4}$. Only the
-    # unambiguous three-letter products match bare — TAIFEX ``TE``/``TF`` collide
-    # with CFFEX bond futures, so those require the explicit .TAIFEX suffix.
+    # which would otherwise claim ``TXF2608`` via ^[A-Z]{2,4}\d{4}$, and the
+    # bare-US-ticker rule at the very end, which would claim a bare ``TXF``.
+    # Only the unambiguous three-letter products match bare — TAIFEX ``TE``/
+    # ``TF`` collide with CFFEX bond futures, so those require the explicit
+    # .TAIFEX suffix.
     (re.compile(r"^(TXF|MXF|TMF)\d*$", re.I), "tw_futures"),
     (re.compile(r"^[A-Z]{2,4}\d*\.TAIFEX$", re.I), "tw_futures"),
+    # Canada equities: Toronto Stock Exchange (TD.TO) and TSX Venture
+    # (PNG.V). Yahoo carries both suffixes verbatim.
+    (re.compile(r"^[A-Z0-9&.\-]+\.(TO|V)$", re.I), "ca_equity"),
     (re.compile(r"^[A-Z]+-USDT$", re.I), "crypto"),
     (re.compile(r"^[A-Z]+/USDT$", re.I), "crypto"),
+    # yfinance's native crypto spelling (BTC-USD, ETH-USD). Distinct from
+    # USDT pairs only in the quote currency; both belong to CryptoEngine.
+    (re.compile(r"^[A-Z]+-USD$", re.I), "crypto"),
     # China futures: product+delivery.exchange (e.g. IF2406.CFFEX, rb2410.SHFE)
     (re.compile(r"^[A-Za-z]{1,2}\d{3,4}\.(ZCE|DCE|SHFE|INE|CFFEX|GFEX)$", re.I), "futures"),
     # Global futures: product+month-code (e.g. ESZ4, CLF25, GCM2025)
@@ -54,9 +62,73 @@ _MARKET_PATTERNS = [
     # Forex pairs: XXX/YYY or XXXXXX.FX
     (re.compile(r"^[A-Z]{3}/[A-Z]{3}$"), "forex"),
     (re.compile(r"^[A-Z]{6}\.FX$"), "forex"),
+    # Bare US tickers (AAPL, MSFT, SPY, T, ...). Must stay LAST so every
+    # suffixed equity / futures / crypto / forex form above wins first.
+    # ``{1,5}`` covers every standard US ticker length while 6-char bare
+    # forex (EURUSD) and longer crypto codes (BTCUSDT) fall through to the
+    # a_share default.
+    (re.compile(r"^[A-Z]{1,5}$", re.I), "us_equity"),
 ]
 
 _CHINA_EXCHANGES = {"CFFEX", "SHFE", "DCE", "ZCE", "INE", "GFEX"}
+
+# Settlement currency per market. A composite backtest holds one shared capital
+# pool, so a code set spanning two of these would add CNY to USD to KRW as if
+# they were the same unit.
+_MARKET_CURRENCY = {
+    "a_share": "CNY",
+    "us_equity": "USD",
+    "hk_equity": "HKD",
+    "india_equity": "INR",
+    "kr_equity": "KRW",
+    "ca_equity": "CAD",
+    # TAIFEX index futures settle in TWD like the cash market, so both Taiwan
+    # markets belong here rather than falling to the futures branch below,
+    # which assumes USD for any venue it does not name.
+    "tw_equity": "TWD",
+    "tw_futures": "TWD",
+    # Every crypto pattern in _MARKET_PATTERNS is USDT-quoted, and USDT is
+    # carried at its USD peg. This is the one approximation in the table: a
+    # depeg would make a crypto+US book wrong by the depeg amount, which is
+    # orders of magnitude below the CNY/USD-style unit error this guard exists
+    # to catch.
+    "crypto": "USD",
+}
+
+# Non-US futures venues. The GlobalFuturesEngine is USD-denominated end to end
+# — margin, commission and contract multipliers are all in USD and it carries
+# no EUR or JPY product — so anything it handles settles in USD unless the
+# symbol names a venue that does not.
+_FUTURES_EXCHANGE_CURRENCY = {"EUREX": "EUR"}
+
+
+def code_currency(code: str) -> str:
+    """Return the currency a symbol settles in.
+
+    Args:
+        code: Ticker / symbol string.
+
+    Returns:
+        A currency code such as ``"CNY"``. A forex pair resolves to its quote
+        currency and Chinese futures to ``"CNY"``. A symbol whose currency
+        cannot be established returns a ``"UNKNOWN:<market>"`` marker rather
+        than a guess, so a homogeneous set still compares equal while a mixed
+        one cannot pass a same-currency check by accident.
+    """
+    market = _detect_market(code)
+    if market in _MARKET_CURRENCY:
+        return _MARKET_CURRENCY[market]
+    if market == "forex":
+        pair = code.upper().replace("/", "")
+        if pair.endswith(".FX"):
+            pair = pair[:-3]
+        return pair[3:6] if len(pair) == 6 else "UNKNOWN:forex"
+    if market == "futures":
+        if _is_china_futures(code):
+            return "CNY"
+        exchange = code.upper().rpartition(".")[2]
+        return _FUTURES_EXCHANGE_CURRENCY.get(exchange, "USD")
+    return f"UNKNOWN:{market}"
 
 # Known Chinese-futures product codes — used as a heuristic when a symbol
 # lacks an exchange suffix (e.g. bare ``RB2410``, ``IF2406``). Without this
@@ -83,8 +155,10 @@ def _detect_market(code: str) -> str:
         code: Ticker / symbol string.
 
     Returns:
-        Market type (a_share/us_equity/hk_equity/crypto/futures/forex);
-        unknown defaults to ``a_share``.
+        Market type (a_share/us_equity/hk_equity/india_equity/kr_equity/
+        ca_equity/crypto/futures/forex).
+        Bare 1-5 letter alphabetic tickers resolve to ``us_equity``;
+        any other unknown format defaults to ``a_share``.
     """
     for pattern, market in _MARKET_PATTERNS:
         if pattern.match(code):
@@ -124,17 +198,20 @@ def _is_china_futures(code: str) -> bool:
 
 
 def _detect_submarket(codes: List[str]) -> str:
-    """Detect US vs HK from symbol suffixes.
+    """Detect US, HK, or Canada from symbol suffixes.
 
     Args:
         codes: Instrument codes.
 
     Returns:
-        ``"hk"`` if any code ends with ``.HK``, else ``"us"``.
+        ``"hk"`` for ``.HK``, ``"ca"`` for ``.TO``/``.V``, else ``"us"``.
     """
     for code in codes:
-        if code.upper().endswith(".HK"):
+        upper = code.upper()
+        if upper.endswith(".HK"):
             return "hk"
+        if upper.endswith((".TO", ".V")):
+            return "ca"
     return "us"
 
 # ── Crypto: OKX tiered maintenance margin table (simplified) ──

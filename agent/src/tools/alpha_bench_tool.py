@@ -41,6 +41,7 @@ from typing import Any
 
 import pandas as pd
 
+from backtest.loaders.cn_adjust import apply_qfq as _apply_qfq
 from src.agent.tools import BaseTool
 from src.config.accessor import get_env_config
 
@@ -328,19 +329,38 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
     codes: list[str] = []
     constituent_source = "tushare index_weight"
     constituent_source_date: str | None = None
+    membership: pd.DataFrame | None = None
     try:
+        # Reach back before ``start`` so the snapshot that was in force on the
+        # first requested day is included; Tushare publishes month-end rosters.
+        lookback = (pd.Timestamp(start) - pd.Timedelta(days=60)).strftime("%Y%m%d")
         weights = pro.index_weight(
-            index_code="399300.SZ", start_date=sd, end_date=ed
+            index_code="399300.SZ", start_date=lookback, end_date=ed
         )
         if weights is not None and not weights.empty:
-            latest_date = weights["trade_date"].max()
-            constituent_source_date = str(latest_date)
-            codes = (
-                weights[weights["trade_date"] == latest_date]["con_code"]
-                .drop_duplicates()
-                .tolist()
+            frame = weights.copy()
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+            frame = frame.dropna(subset=["trade_date", "con_code"])
+            constituent_source_date = str(weights["trade_date"].max())
+            # Every name that was a member at any point in the window, so the
+            # panel can carry a name that later left the index.
+            codes = sorted(frame["con_code"].astype(str).unique())
+            membership = (
+                frame.assign(_member=True)
+                .pivot_table(
+                    index="trade_date",
+                    columns="con_code",
+                    values="_member",
+                    aggfunc="first",
+                )
+                .notna()
+                .sort_index()
             )
-            logger.info("csi300: %d constituents from index_weight @ %s", len(codes), latest_date)
+            logger.info(
+                "csi300: %d names ever a member across %d roster snapshots",
+                len(codes),
+                len(membership),
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("csi300 index_weight failed (%s); using fallback list", exc)
 
@@ -365,7 +385,9 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         keep = [c for c in ("open", "high", "low", "close", "volume", "amount") if c in df.columns]
-        return code, df[keep].dropna(subset=["open", "high", "low", "close"])
+        df = df[keep].dropna(subset=["open", "high", "low", "close"])
+        factor = _retry(lambda: pro.adj_factor(ts_code=code, start_date=sd, end_date=ed))
+        return code, _apply_qfq(df, factor)
 
     fetched: dict[str, pd.DataFrame] = {}
     with ThreadPoolExecutor(max_workers=_CSI300_FETCH_WORKERS) as pool:
@@ -379,6 +401,26 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
             if frame is not None and not frame.empty:
                 fetched[code] = frame
 
+    # A name with no usable adjustment factors is dropped rather than benched on
+    # raw prices, so the drop has to be visible or it becomes its own silent bias.
+    dropped = sorted(set(codes) - set(fetched))
+    if not fetched:
+        raise RuntimeError(
+            "csi300: no symbol survived corporate-action adjustment — "
+            "pro.adj_factor returned nothing usable for any of the "
+            f"{len(codes)} names, which usually means the Tushare token lacks "
+            "adj_factor permission. Benching on unadjusted prices is not an "
+            "alternative: an ex-date injects a fabricated cross-sectional "
+            "return, measured at -47.2% on 300750.SZ 2023-04-26."
+        )
+    if dropped:
+        logger.warning(
+            "csi300: dropped %d/%d name(s) with no usable adjustment factors: %s",
+            len(dropped),
+            len(codes),
+            ", ".join(dropped[:10]) + ("..." if len(dropped) > 10 else ""),
+        )
+
     panel = _wide_from_fetched(fetched, include_amount=True)
     # CN equity vwap: Tushare ``amount`` is in 千元, ``volume`` in 手. True VWAP
     # = (amount * 1000 CNY) / (volume * 100 shares). Matches
@@ -389,15 +431,38 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
         panel["vwap"] = safe_div(
             panel["amount"] * 1000.0, panel["volume"] * 100.0 + 1.0
         )
+
+    # Restrict each date's cross-section to the names that were index members on
+    # that date. Without this the panel carries today's roster back through the
+    # whole window, so a name is only present because it survived to the end —
+    # every IC is then measured on a set selected with hindsight.
+    if membership is not None:
+        mask = (
+            membership.reindex(columns=panel["close"].columns)
+            .reindex(index=panel["close"].index.union(membership.index))
+            .ffill()
+            .reindex(panel["close"].index)
+            .bfill()
+            .fillna(False)
+            .astype(bool)
+        )
+        for key, frame in panel.items():
+            if isinstance(frame, pd.DataFrame):
+                panel[key] = frame.where(mask)
+
     panel["_meta"] = {
         "universe": "csi300",
-        # A terminal snapshot is forward-looking relative to the start of the
-        # requested interval; the static fallback is survivor-selected too.
-        "survivorship_bias": True,
+        # True only on the degraded path: the hand-picked fallback is a
+        # survivor-selected static roster with no point-in-time membership.
+        "survivorship_bias": membership is None,
+        "pit_membership": membership is not None,
         "degraded": constituent_source != "tushare index_weight",
         "constituent_source": constituent_source,
         "constituent_source_date": constituent_source_date,
         "constituent_count": len(codes),
+        # Prices are corporate-action adjusted; raw pro.daily is not.
+        "price_adjustment": "qfq",
+        "dropped_unadjustable": len(dropped),
     }
     return panel
 
@@ -727,6 +792,28 @@ _JINJA_TEMPLATE = """<!doctype html>
 {% endfor %}
 </table>
 
+{% if strict %}
+<h2>Strict gate</h2>
+<div class="meta">
+  Alpha t-stats against the same-universe random control. The strict gate
+  decides on these, not on IC.
+</div>
+<table>
+<tr><th>Alpha ID</th><th>alpha_t full</th><th>alpha_t train</th>
+    <th>alpha_t test</th><th>random IC mean</th><th>Category</th></tr>
+{% for row in top %}
+<tr>
+  <td>{{ row.id }}</td>
+  <td>{{ "%.4f"|format(row.get('alpha_t_full')) if row.get('alpha_t_full') is not none else "n/a" }}</td>
+  <td>{{ "%.4f"|format(row.get('alpha_t_train')) if row.get('alpha_t_train') is not none else "n/a" }}</td>
+  <td>{{ "%.4f"|format(row.get('alpha_t_test')) if row.get('alpha_t_test') is not none else "n/a" }}</td>
+  <td>{{ "%.6f"|format(row.get('random_ic_mean')) if row.get('random_ic_mean') is not none else "n/a" }}</td>
+  <td>{{ row.category }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+
 <h2>Formulas</h2>
 <table>
 <tr><th>Alpha ID</th><th>Formula (LaTeX source)</th></tr>
@@ -798,7 +885,30 @@ def _render_html_manual(ctx: dict[str, Any]) -> str:
             f"<td>{ic_pos}</td>"
             f"<td>{_esc(row['ic_count'])}</td></tr>"
         )
-    parts.append("</table><h2>Formulas</h2><table>")
+    parts.append("</table>")
+    if ctx.get("strict"):
+        parts.append(
+            "<h2>Strict gate</h2>"
+            "<div class=\"meta\">Alpha t-stats against the same-universe random "
+            "control. The strict gate decides on these, not on IC.</div><table>"
+            "<tr><th>Alpha ID</th><th>alpha_t full</th><th>alpha_t train</th>"
+            "<th>alpha_t test</th><th>random IC mean</th><th>Category</th></tr>"
+        )
+
+        def _fmt(value: Any, places: int = 4) -> str:
+            return "n/a" if value is None else _esc(f"{value:.{places}f}")
+
+        for row in ctx["top"]:
+            parts.append(
+                f"<tr><td>{_esc(row['id'])}</td>"
+                f"<td>{_fmt(row.get('alpha_t_full'))}</td>"
+                f"<td>{_fmt(row.get('alpha_t_train'))}</td>"
+                f"<td>{_fmt(row.get('alpha_t_test'))}</td>"
+                f"<td>{_fmt(row.get('random_ic_mean'), 6)}</td>"
+                f"<td>{_esc(row.get('category'))}</td></tr>"
+            )
+        parts.append("</table>")
+    parts.append("<h2>Formulas</h2><table>")
     parts.append("<tr><th>Alpha ID</th><th>Formula (LaTeX source)</th></tr>")
     for row in ctx["top"]:
         parts.append(
@@ -913,7 +1023,7 @@ def run_alpha_bench(**kwargs: Any) -> dict[str, Any]:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    report_path = output_dir / f"alpha_bench_{ts}.html"
+    report_path = output_dir / f"alpha_bench_{ts}_{secrets.token_hex(16)}.html"
 
     context = {
         "csp": _CSP,
@@ -928,7 +1038,11 @@ def run_alpha_bench(**kwargs: Any) -> dict[str, Any]:
     }
 
     try:
-        report_path.write_text(_render_html(context), encoding="utf-8")
+        report_html = _render_html(context)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        report_fd = os.open(report_path, flags, 0o666)
+        with os.fdopen(report_fd, "w", encoding="utf-8") as report_file:
+            report_file.write(report_html)
     except OSError as exc:
         return {"status": "error", "error": f"failed to write report: {exc}"}
 

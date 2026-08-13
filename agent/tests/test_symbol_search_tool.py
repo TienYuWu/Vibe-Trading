@@ -72,6 +72,18 @@ def _yahoo_quotes() -> list:
             "exchange": "CCC",
             "quoteType": "CRYPTOCURRENCY",
         },
+        {
+            "symbol": "TD.TO",
+            "shortname": "Toronto-Dominion Bank",
+            "exchange": "TOR",
+            "quoteType": "EQUITY",
+        },
+        {
+            "symbol": "PNG.V",
+            "shortname": "Kraken Robotics Inc.",
+            "exchange": "VAN",
+            "quoteType": "EQUITY",
+        },
         {"symbol": "", "shortname": "no symbol"},  # dropped
     ]
 
@@ -101,6 +113,9 @@ class TestSymbolSearchSuccess:
         assert data["sources"]["sec_edgar"] == "ok"
 
         by_symbol = {c["symbol"]: c for c in data["candidates"]}
+
+        assert by_symbol["TD.TO"]["market"] == "ca"
+        assert by_symbol["PNG.V"]["market"] == "ca"
 
         # A-share secid -> 600519.SH, market cn.
         assert by_symbol["600519.SH"]["market"] == "cn"
@@ -161,6 +176,151 @@ class TestSymbolSearchSuccess:
         assert "sec_edgar" not in payload["data"]["sources"]
         mock_cik.assert_not_called()
 
+    def test_canadian_query_skips_eastmoney_endpoint(self):
+        """A Canadian .V/.TO query fails fast: eastmoney is never contacted."""
+        with patch.object(
+            ss.eastmoney_client, "get_json"
+        ) as mock_em, patch.object(
+            ss.yahoo_client, "search", return_value=_yahoo_quotes()
+        ):
+            out = ss.SymbolSearchTool().execute(query="BYN.V")
+
+        mock_em.assert_not_called()
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["data"]["sources"]["eastmoney"] == (
+            "skipped: eastmoney has no Canada coverage"
+        )
+
+    def test_canadian_query_drops_us_otc_aliases(self):
+        """Yahoo OTC aliases (BYAGF.US) of a Canadian name are filtered out."""
+        quotes = [
+            {
+                "symbol": "BYN.V",
+                "shortname": "Banyan Gold Corp.",
+                "exchange": "VAN",
+                "quoteType": "EQUITY",
+            },
+            {
+                "symbol": "BYAGF.US",
+                "shortname": "Banyan Gold Corp.",
+                "exchange": "PNK",
+                "quoteType": "EQUITY",
+            },
+        ]
+        with patch.object(
+            ss.eastmoney_client, "get_json"
+        ), patch.object(ss.yahoo_client, "search", return_value=quotes):
+            out = ss.SymbolSearchTool().execute(query="BYN.V")
+
+        payload = json.loads(out)
+        symbols = {c["symbol"] for c in payload["data"]["candidates"]}
+        assert symbols == {"BYN.V"}
+        assert "BYAGF.US" not in symbols
+
+    def test_canadian_query_drops_us_otc_aliases_cert(self):
+        """CERT.V OTC alias (CERT.US) is filtered for a Canadian query."""
+        quotes = [
+            {
+                "symbol": "CERT.V",
+                "shortname": "Cerrado Gold Inc.",
+                "exchange": "VAN",
+                "quoteType": "EQUITY",
+            },
+            {
+                "symbol": "CERT.US",
+                "shortname": "Cerrado Gold Inc.",
+                "exchange": "PNK",
+                "quoteType": "EQUITY",
+            },
+        ]
+        with patch.object(
+            ss.eastmoney_client, "get_json"
+        ), patch.object(ss.yahoo_client, "search", return_value=quotes):
+            out = ss.SymbolSearchTool().execute(query="CERT.V")
+
+        payload = json.loads(out)
+        symbols = {c["symbol"] for c in payload["data"]["candidates"]}
+        assert symbols == {"CERT.V"}
+
+    def test_canadian_tsx_to_query_keeps_to_only(self):
+        """A .TO (TSX) query keeps only the .TO candidate, not a US alias."""
+        quotes = [
+            {
+                "symbol": "PDI.TO",
+                "shortname": "Predictive Discovery",
+                "exchange": "TOR",
+                "quoteType": "EQUITY",
+            },
+            {
+                "symbol": "PDIYF.US",
+                "shortname": "Predictive Discovery ADR",
+                "exchange": "PNK",
+                "quoteType": "EQUITY",
+            },
+        ]
+        with patch.object(
+            ss.eastmoney_client, "get_json"
+        ), patch.object(ss.yahoo_client, "search", return_value=quotes):
+            out = ss.SymbolSearchTool().execute(query="PDI.TO")
+
+        payload = json.loads(out)
+        symbols = {c["symbol"] for c in payload["data"]["candidates"]}
+        assert symbols == {"PDI.TO"}
+
+    def test_canadian_ticker_with_name_text_skips_eastmoney(self):
+        """A "TICKER.TO <name>" query (e.g. "BTO.TO B2Gold") still fails fast.
+
+        The model commonly searches the suffixed ticker plus a name hint; the
+        leading .TO/.V suffix is unambiguous Canada, so Eastmoney (no Canada
+        coverage) must not be contacted.
+        """
+        with patch.object(
+            ss.eastmoney_client, "get_json"
+        ) as mock_em, patch.object(
+            ss.yahoo_client, "search", return_value=_yahoo_quotes()
+        ):
+            out = ss.SymbolSearchTool().execute(query="BTO.TO B2Gold")
+
+        mock_em.assert_not_called()
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["data"]["sources"]["eastmoney"] == (
+            "skipped: eastmoney has no Canada coverage"
+        )
+
+    def test_canadian_v_ticker_with_name_text_skips_eastmoney(self):
+        """"SGML.V Sigma Lithium Vancouver" fails fast on the leading .V suffix."""
+        with patch.object(
+            ss.eastmoney_client, "get_json"
+        ) as mock_em, patch.object(
+            ss.yahoo_client, "search", return_value=_yahoo_quotes()
+        ):
+            out = ss.SymbolSearchTool().execute(query="SGML.V Sigma Lithium Vancouver")
+
+        mock_em.assert_not_called()
+        payload = json.loads(out)
+        assert payload["data"]["sources"]["eastmoney"] == (
+            "skipped: eastmoney has no Canada coverage"
+        )
+
+    def test_bare_name_without_suffix_still_hits_eastmoney(self):
+        """A bare name (no .TO/.V) is NOT fail-fast — venue is ambiguous.
+
+        This preserves the documented design: bare names like "B2Gold BTO" or
+        "BTO" may be legit non-Canadian lookups, so Eastmoney fan-out stays.
+        """
+        with patch.object(
+            ss.eastmoney_client, "get_json", return_value=_eastmoney_payload()
+        ) as mock_em, patch.object(
+            ss.yahoo_client, "search", return_value=_yahoo_quotes()
+        ):
+            out = ss.SymbolSearchTool().execute(query="B2Gold BTO")
+
+        mock_em.assert_called_once()
+        payload = json.loads(out)
+        assert payload["data"]["sources"]["eastmoney"] == "ok"
+
 
 class TestSymbolSearchErrors:
     """Error envelopes and per-source resilience."""
@@ -210,3 +370,67 @@ class TestSymbolSearchErrors:
         # The US candidate still appears, just without a CIK.
         aapl = next(c for c in payload["data"]["candidates"] if c["symbol"] == "AAPL.US")
         assert "cik" not in aapl
+
+
+class TestShanghaiAliasAndUnsupportedQueries:
+    """The two resolver defects that made Shanghai and Chinese queries unusable."""
+
+    def test_yahoo_shanghai_suffix_folds_onto_the_project_convention(self):
+        """Yahoo's ``.SS`` and Eastmoney's ``.SH`` must merge into one candidate.
+
+        Emitted separately they became two rival candidates for one listing,
+        which no downstream tie-break could resolve, so every Shanghai query
+        dead-ended before any market tool could run.
+        """
+        with patch.object(
+            ss.eastmoney_client, "get_json", return_value=_eastmoney_payload()
+        ), patch.object(
+            ss.yahoo_client,
+            "search",
+            return_value=[
+                {
+                    "symbol": "600519.SS",
+                    "shortname": "Kweichow Moutai Co Ltd",
+                    "exchange": "SHH",
+                    "quoteType": "EQUITY",
+                }
+            ],
+        ):
+            data = json.loads(ss.SymbolSearchTool().execute(query="600519"))["data"]
+
+        by_symbol = {c["symbol"]: c for c in data["candidates"]}
+        assert "600519.SS" not in by_symbol
+        assert by_symbol["600519.SH"]["market"] == "cn"
+        assert "yahoo" in by_symbol["600519.SH"].get("also_from", [])
+
+    def test_non_ascii_query_skips_yahoo_without_calling_it(self):
+        """A source that cannot serve a query shape is skipped, not failed.
+
+        Yahoo answers any non-ASCII query with HTTP 400. Recording that as a
+        source failure made "this entity is not listed" indistinguishable from
+        "a source is down" for every Chinese query.
+        """
+        with patch.object(
+            ss.eastmoney_client, "get_json", return_value=_eastmoney_payload()
+        ), patch.object(ss.yahoo_client, "search") as search, patch.object(
+            ss.sec_edgar_client, "cik_for", return_value="0000320193"
+        ):
+            data = json.loads(ss.SymbolSearchTool().execute(query="贵州茅台"))["data"]
+
+        search.assert_not_called()
+        assert data["sources"]["yahoo"].startswith("skipped:")
+        assert data["sources"]["eastmoney"] == "ok"
+
+    def test_ascii_query_still_reaches_yahoo(self):
+        """The skip is keyed on the query shape, not switched on permanently."""
+        with patch.object(
+            ss.eastmoney_client, "get_json", return_value=_eastmoney_payload()
+        ), patch.object(
+            ss.yahoo_client, "search", return_value=_yahoo_quotes()
+        ) as search, patch.object(
+            ss.sec_edgar_client, "cik_for", return_value="0000320193"
+        ):
+            data = json.loads(ss.SymbolSearchTool().execute(query="apple"))["data"]
+
+        search.assert_called_once()
+        assert data["sources"]["yahoo"] == "ok"

@@ -33,7 +33,7 @@ import pandas as pd
 
 from backtest.engines.china_a import _blocked_by_limit
 from backtest.engines.futures_base import FuturesBaseEngine
-from backtest.engines.taifex_margins import get_initial_margins
+from backtest.taifex_margins import get_initial_margins
 
 
 # ── Contract multiplier (NT$ per index point) ──

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from backtest.engines._market_hooks import _is_china_futures
+from backtest.engines._market_hooks import _is_china_futures, code_currency
 from backtest.runner import (
     _detect_market,
     _detect_source,
@@ -46,6 +46,15 @@ class TestDetectMarket:
             ("AAPL.US", "us_equity"),
             ("TSLA.US", "us_equity"),
             ("NVDA.US", "us_equity"),
+            # US equity — bare tickers without the .US suffix (issue #986)
+            ("AAPL", "us_equity"),
+            ("MSFT", "us_equity"),
+            ("NVDA", "us_equity"),
+            ("AMZN", "us_equity"),
+            ("GOOGL", "us_equity"),
+            ("SPY", "us_equity"),
+            ("T", "us_equity"),
+            ("V", "us_equity"),
             # HK equity
             ("0700.HK", "hk_equity"),
             ("9988.HK", "hk_equity"),
@@ -70,6 +79,13 @@ class TestDetectMarket:
             ("MXF2608", "tw_futures"),
             ("TE2608.TAIFEX", "tw_futures"),
             ("TF2406.CFFEX", "futures"),
+            # A bare TAIFEX product must beat the bare-US-ticker rule that
+            # upstream added at the end of the pattern list.
+            ("TXF", "tw_futures"),
+            # Canada equity (TSX / TSX Venture)
+            ("TD.TO", "ca_equity"),
+            ("BBD-B.TO", "ca_equity"),
+            ("PNG.V", "ca_equity"),
             # Crypto
             ("BTC-USDT", "crypto"),
             ("ETH-USDT", "crypto"),
@@ -92,11 +108,75 @@ class TestDetectMarket:
     def test_case_insensitive(self) -> None:
         assert _detect_market("000001.sz") == "a_share"
         assert _detect_market("aapl.us") == "us_equity"
+        assert _detect_market("aapl") == "us_equity"
         assert _detect_market("btc-usdt") == "crypto"
+        assert _detect_market("td.to") == "ca_equity"
 
     def test_unknown_defaults_to_a_share(self) -> None:
         assert _detect_market("UNKNOWN") == "a_share"
         assert _detect_market("random-string") == "a_share"
+        # Bare codes outside the 1-5 letter US shape keep the old default.
+        assert _detect_market("EURUSD") == "a_share"
+        assert _detect_market("BTCUSDT") == "a_share"
+
+
+# ---------------------------------------------------------------------------
+# Issue #986 — bare US tickers must route to the us_equity chain
+# ---------------------------------------------------------------------------
+
+
+class TestBareUsTickerRouting:
+    """Regression suite for issue #986.
+
+    Bare US tickers (the Shadow Account US basket, agent-generated configs)
+    previously fell through to the a_share default, walked the A-share
+    loader chain, and died with NoAvailableSourceError. The catch-all
+    ``^[A-Z]{1,5}$`` pattern must stay the lowest-priority entry so every
+    suffixed / futures / crypto / forex form keeps winning first.
+    """
+
+    def test_shadow_us_basket_groups_into_us_equity(self) -> None:
+        basket = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
+        groups = _group_codes_by_market(basket)
+        assert groups == {"us_equity": basket}
+
+    def test_bare_ticker_source_and_currency(self) -> None:
+        assert _detect_source("AAPL") == "yfinance"
+        assert code_currency("AAPL") == "USD"
+        assert code_currency("AAPL.US") == "USD"
+
+    def test_canadian_tickers_route_to_canada_and_cad(self) -> None:
+        assert _detect_source("TD.TO") == "yahoo"
+        assert _detect_source("PNG.V") == "yahoo"
+        assert code_currency("TD.TO") == "CAD"
+        assert code_currency("PNG.V") == "CAD"
+
+    def test_catch_all_is_lowest_priority(self) -> None:
+        assert _detect_market("600519.SH") == "a_share"
+        assert _detect_market("00700.HK") == "hk_equity"
+        assert _detect_market("BTC-USDT") == "crypto"
+        assert _detect_market("RELIANCE.NS") == "india_equity"
+        assert _detect_market("005930.KS") == "kr_equity"
+        assert _detect_market("RB2410") == "futures"
+        assert _detect_market("ES2503") == "futures"
+        assert _detect_market("CLZ4") == "futures"
+        assert _detect_market("EUR/USD") == "forex"
+
+    def test_shadow_liquid_baskets_route_to_their_own_market(self) -> None:
+        from src.shadow_account.backtester import _LIQUID_BASKETS
+
+        expected = {
+            "china_a": "a_share",
+            "hk": "hk_equity",
+            "us": "us_equity",
+            "crypto": "crypto",
+        }
+        for market, codes in _LIQUID_BASKETS.items():
+            for code in codes:
+                assert _detect_market(code) == expected[market], (
+                    f"{market} basket code {code!r} detected as "
+                    f"{_detect_market(code)!r}, expected {expected[market]!r}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +197,8 @@ class TestDetectSource:
             ("500325.BO", "yahoo"),
             ("005930.KS", "pykrx"),
             ("247540.KQ", "pykrx"),
+            ("TD.TO", "yahoo"),
+            ("PNG.V", "yahoo"),
             ("BTC-USDT", "okx"),
             ("IF2406.CFFEX", "tushare"),
             ("EUR/USD", "akshare"),
@@ -133,12 +215,13 @@ class TestDetectSource:
 
 class TestGroupCodes:
     def test_mixed_codes(self) -> None:
-        codes = ["000001.SZ", "AAPL.US", "BTC-USDT", "0700.HK"]
+        codes = ["000001.SZ", "AAPL.US", "BTC-USDT", "0700.HK", "TD.TO"]
         groups = _group_codes_by_market(codes)
         assert groups["a_share"] == ["000001.SZ"]
         assert groups["us_equity"] == ["AAPL.US"]
         assert groups["crypto"] == ["BTC-USDT"]
         assert groups["hk_equity"] == ["0700.HK"]
+        assert groups["ca_equity"] == ["TD.TO"]
 
     def test_same_market(self) -> None:
         codes = ["000001.SZ", "600519.SH"]

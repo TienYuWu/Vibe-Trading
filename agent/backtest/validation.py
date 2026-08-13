@@ -116,7 +116,12 @@ def monte_carlo_test(
 def _path_metrics(pnls: np.ndarray, initial_capital: float) -> Dict[str, float]:
     """Compute Sharpe and max drawdown from a PnL sequence."""
     equity = initial_capital + np.cumsum(pnls)
-    returns = np.diff(equity) / equity[:-1] if len(equity) > 1 else np.array([0.0])
+    if len(equity) > 1:
+        prev = equity[:-1]
+        diff = np.diff(equity)
+        returns = np.where(prev != 0, diff / np.where(prev != 0, prev, 1.0), 0.0)
+    else:
+        returns = np.array([0.0])
     std = returns.std()
     sharpe = float(returns.mean() / (std + 1e-10) * np.sqrt(252))
     peak = np.maximum.accumulate(equity)
@@ -160,7 +165,7 @@ def bootstrap_sharpe_ci(
     if isinstance(seed, bool) or not isinstance(seed, Integral) or seed < 0:
         return {"error": f"seed must be >= 0, got {seed}"}
 
-    returns = equity_curve.pct_change().dropna().values
+    returns = equity_curve.pct_change().replace([np.inf, -np.inf], 0.0).dropna().values
     if len(returns) < 5:
         return {"error": "need at least 5 return observations"}
 
@@ -240,7 +245,7 @@ def walk_forward_analysis(
 
         # Per-window metrics
         ret = float(win_eq.iloc[-1] / win_eq.iloc[0] - 1) if win_eq.iloc[0] > 0 else 0.0
-        win_returns = win_eq.pct_change().dropna().values
+        win_returns = win_eq.pct_change().replace([np.inf, -np.inf], 0.0).dropna().values
         sharpe = _sharpe(win_returns, bars_per_year) if len(win_returns) > 1 else 0.0
 
         peak = win_eq.cummax()
@@ -367,8 +372,10 @@ def _load_trades(run_dir: Path) -> List[TradeRecord]:
     trades = []
     exit_rows = df[df["pnl"] != 0].reset_index(drop=True)
     for _, row in exit_rows.iterrows():
-        hold = pd.to_numeric(row.get("holding_days", 0), errors="coerce")
-        holding_bars = 0 if pd.isna(hold) else int(hold)
+        hold = pd.to_numeric(row.get("holding_bars"), errors="coerce")
+        if pd.isna(hold):
+            hold = pd.to_numeric(row.get("holding_days", 0), errors="coerce")
+        holding_bars = 0.0 if pd.isna(hold) else float(hold)
         trades.append(
             TradeRecord(
                 symbol=str(row.get("code", "")),

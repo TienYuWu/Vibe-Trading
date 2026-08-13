@@ -29,6 +29,11 @@ class TestLocalSourceEngineRouting:
         engine = _create_market_engine("local", {"initial_cash": 100_000}, ["00700.HK"])
         assert isinstance(engine, GlobalEquityEngine)
 
+    def test_local_canadian_equity_routes_to_canadian_global_rules(self) -> None:
+        engine = _create_market_engine("local", {"initial_cash": 100_000}, ["TD.TO"])
+        assert isinstance(engine, GlobalEquityEngine)
+        assert engine.market == "ca"
+
     def test_local_crypto_still_routes_to_crypto_engine(self) -> None:
         engine = _create_market_engine("local", {"initial_cash": 100_000}, ["BTC-USDT"])
         assert isinstance(engine, CryptoEngine)
@@ -76,6 +81,23 @@ class _SwappedNetworkLoader:
 
 
 class TestBenchmarkLoaderForwarding:
+    def test_canadian_equity_uses_canadian_benchmark(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fallback = _FakeLoader([100.0, 103.0])
+        monkeypatch.setattr("backtest.benchmark.YfinanceLoader", lambda: fallback)
+
+        result = resolve_benchmark(
+            strategy_codes=["BBD-B.TO"],
+            source="yahoo",
+            start_date="2023-01-03",
+            end_date="2023-01-04",
+        )
+
+        assert result is not None
+        assert result.ticker == "XIC.TO"
+        assert fallback.fetched == ["XIC.TO"]
+
     def test_explicit_source_loader_is_used_instead_of_yfinance(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

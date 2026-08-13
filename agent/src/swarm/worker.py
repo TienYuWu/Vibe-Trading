@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from src.agent.context import ContextBuilder
 from src.agent.progress import HeartbeatTimer
 from src.agent.skills import SkillsLoader
 from src.agent.tools import ToolRegistry
+from src.config.limits import TOOL_RESULT_LIMIT
 from src.config.schema import AgentConfig
 from src.providers.chat import ChatLLM, LLMResponse, ProviderStreamError
 from src.providers.content_filter import (
@@ -199,31 +201,20 @@ def build_worker_prompt(
     Returns:
         Complete system prompt string for the worker LLM.
     """
-    upstream_block = ""
-    if upstream_summaries:
-        sections = []
-        for key, summary in upstream_summaries.items():
-            sections.append(f"### {key}\n{summary}")
-        upstream_block = (
-            "## Upstream Context (from previous agents)\n\n"
-            + "\n\n".join(sections)
-        )
-
-    prompt_parts = [
-        f"## Role\n\n{agent_spec.role}",
-        agent_spec.system_prompt.replace("{upstream_context}", upstream_block),
-    ]
+    # Static, agent-invariant blocks first: for a given agent_spec these are
+    # byte-identical on every call (skill_descriptions/tools come from the
+    # agent's own YAML spec, not the current task), so they form one stable
+    # prompt-cache-eligible prefix across a swarm's repeated calls to the
+    # same agent. Anything that varies per call (upstream context, grounding
+    # data, the current date) is appended after, in the same relative order
+    # as before -- a cache hit only needs a stable *prefix*, so moving the
+    # variable tail doesn't need to preserve position, only what precedes it.
+    prompt_parts = [f"## Role\n\n{agent_spec.role}"]
 
     if skill_descriptions and skill_descriptions != "(no matching skills)":
         prompt_parts.append(
             f"## Available Skills (use load_skill to access full documentation)\n\n{skill_descriptions}"
         )
-
-    if grounding_block:
-        # Placed before Execution Rules so it's in scope when the worker
-        # plans its first tool call. The block already contains an explicit
-        # instruction to prefer these prices over training data.
-        prompt_parts.append(grounding_block)
 
     if "get_market_data" in (agent_spec.tools or []):
         prompt_parts.append(
@@ -266,6 +257,26 @@ def build_worker_prompt(
         "it and proceed without."
     )
 
+    # From here on, content varies per call (upstream context substitution,
+    # grounding data, the date), so none of it extends the cacheable prefix
+    # above -- relative order matches the original layout exactly.
+    upstream_block = ""
+    if upstream_summaries:
+        sections = []
+        for key, summary in upstream_summaries.items():
+            sections.append(f"### {key}\n{summary}")
+        upstream_block = (
+            "## Upstream Context (from previous agents)\n\n"
+            + "\n\n".join(sections)
+        )
+    prompt_parts.append(agent_spec.system_prompt.replace("{upstream_context}", upstream_block))
+
+    if grounding_block:
+        # Placed before Execution Rules so it's in scope when the worker
+        # plans its first tool call. The block already contains an explicit
+        # instruction to prefer these prices over training data.
+        prompt_parts.append(grounding_block)
+
     prompt_parts.append(
         "## Execution Rules\n\n"
         "You have a HARD LIMIT of 20 tool calls. After that you will be cut off. Work efficiently.\n\n"
@@ -291,6 +302,74 @@ def build_worker_prompt(
     )
 
     return "\n\n".join(prompt_parts)
+
+
+def agent_artifact_dir(run_dir: Path, agent_id: str) -> Path:
+    """Return the canonical artifacts directory for one agent within a run.
+
+    The single source of truth for this path — shared with the retry loop
+    in ``runtime.py`` so the two can never compute it differently and drift
+    apart.  The guard belongs here rather than only in
+    ``clear_agent_artifacts`` because this path is also used by ``run_worker``
+    for ``mkdir``; validating the shared constructor protects both directory
+    creation and recursive cleanup from the same path escape.
+
+    Args:
+        run_dir: Root directory for the swarm run.
+        agent_id: Single safe path segment identifying the agent.
+
+    Raises:
+        ValueError: If ``agent_id`` is not a single safe path segment or the
+            resolved artifact directory is not exactly one level below the
+            resolved ``run_dir/artifacts`` directory.
+    """
+    artifact_root = run_dir / "artifacts"
+    if (
+        not isinstance(agent_id, str)
+        or not agent_id
+        or agent_id in {".", ".."}
+        or "/" in agent_id
+        or "\\" in agent_id
+    ):
+        raise ValueError(
+            f"Invalid swarm agent id {agent_id!r}: expected one safe path segment"
+        )
+
+    artifact_dir = artifact_root / agent_id
+    resolved_root = artifact_root.resolve()
+    resolved_dir = artifact_dir.resolve()
+    try:
+        relative = resolved_dir.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid swarm agent id {agent_id!r}: artifact path escapes "
+            "the run artifacts directory"
+        ) from exc
+    if len(relative.parts) != 1:
+        raise ValueError(
+            f"Invalid swarm agent id {agent_id!r}: artifact path must be "
+            "one level below the run artifacts directory"
+        )
+    return artifact_dir
+
+
+def clear_agent_artifacts(artifact_dir: Path) -> None:
+    """Remove *artifact_dir* and everything in it, before a retry attempt.
+
+    A retry re-invokes :func:`run_worker` against the same ``artifact_dir``.
+    Without this, a failed attempt's ``report.md`` (or any other file a tool
+    wrote) would still be sitting there when the retried attempt reads the
+    directory back via ``_resolve_summary``/``_report_written``/
+    ``_collect_artifacts``, silently substituting stale content for the new
+    attempt's real result.
+
+    Raises on failure rather than swallowing it: proceeding with a retry
+    while known-stale artifacts remain would recreate the exact bug this
+    exists to prevent. ``run_worker`` recreates the directory itself
+    (``mkdir(parents=True, exist_ok=True)``) on its next invocation.
+    """
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
 
 
 def run_worker(
@@ -385,7 +464,7 @@ def run_worker(
     ]
 
     # 6. ReAct loop
-    artifact_dir = run_dir / "artifacts" / agent_id
+    artifact_dir = agent_artifact_dir(run_dir, agent_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.monotonic()
@@ -711,7 +790,9 @@ def run_worker(
                 },
             )
             messages.append(
-                ContextBuilder.format_tool_result(tc.id, tc.name, result[:10_000])
+                ContextBuilder.format_tool_result(
+                    tc.id, tc.name, result[:TOOL_RESULT_LIMIT]
+                )
             )
 
     # Content filter ratio tracking
@@ -863,6 +944,9 @@ def _is_error_result(result: str) -> bool:
     """Did a tool call return a top-level error envelope?
 
     Parses the result as JSON and checks for a top-level ``status == "error"``.
+    Also treats ``ok`` / ``success`` explicitly set to ``False`` as an error,
+    since some tools (e.g. ``get_stock_news``) report failure only through
+    those fields, with no ``status`` key at all.
     A nested ``status`` (e.g. inside ``data``) is intentionally ignored — only
     the envelope matters for the deliverable contract.
 
@@ -880,7 +964,11 @@ def _is_error_result(result: str) -> bool:
         # never raise from a classifier on the worker hot path.
         head = text[:160].lower()
         return '"status": "error"' in head or '"status":"error"' in head
-    return isinstance(parsed, dict) and parsed.get("status") == "error"
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("status") == "error":
+        return True
+    return parsed.get("ok") is False or parsed.get("success") is False
 
 
 def _classify_deliverable(
@@ -905,8 +993,10 @@ def _classify_deliverable(
         return "unparsed tool-call markup (provider did not parse tool calls)"
     if any(m in low for m in _FABRICATION_MARKERS):
         return "explicitly fabricated / mock data"
-    if text.startswith("{") and '"status"' in text[:40] and (
-        '"content"' in text[:300] or '"ok"' in text[:40]
+    if text.startswith("{") and (
+        ('"status"' in text[:40] and ('"content"' in text[:300] or '"ok"' in text[:40]))
+        or '"ok"' in text[:40]
+        or '"success"' in text[:40]
     ):
         return "raw tool-result envelope, not analysis"
     if low.startswith(_PLAN_PREFIXES):

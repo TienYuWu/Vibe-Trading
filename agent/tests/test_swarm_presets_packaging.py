@@ -69,6 +69,55 @@ def test_known_presets_load(preset_name: str) -> None:
     assert data["agents"], f"{preset_name} has no agents"
 
 
+def test_quant_strategy_desk_ends_with_report_aggregator() -> None:
+    """quant_strategy_desk must deliver a final report, not stop at the risk audit.
+
+    Regression for #1029: the preset's last task is task-report run by
+    report_aggregator, consuming all four upstream task summaries.
+    """
+    data = load_preset("quant_strategy_desk")
+
+    agents = {a["id"]: a for a in data["agents"]}
+    assert "report_aggregator" in agents, "report_aggregator agent missing"
+
+    report_task = next(t for t in data["tasks"] if t["id"] == "task-report")
+    assert report_task["agent_id"] == "report_aggregator"
+    assert report_task["depends_on"] == [
+        "task-screen",
+        "task-factor",
+        "task-backtest",
+        "task-risk",
+    ]
+    assert report_task["input_from"] == {
+        "screener_result": "task-screen",
+        "factors": "task-factor",
+        "backtest_result": "task-backtest",
+        "risk_audit": "task-risk",
+    }
+
+
+def test_quant_strategy_desk_report_prompt_covers_four_sections() -> None:
+    """The aggregator prompt must require every deliverable a user expects."""
+    from src.swarm.presets import inspect_preset
+
+    data = load_preset("quant_strategy_desk")
+    prompt = next(
+        a["system_prompt"] for a in data["agents"] if a["id"] == "report_aggregator"
+    )
+    for marker in [
+        "Final strategy",
+        "Selected factors",
+        "Backtest summary",
+        "Risk audit",
+    ]:
+        assert marker in prompt, f"report prompt misses section {marker!r}"
+
+    insp = inspect_preset("quant_strategy_desk")
+    assert insp["valid"] is True, f"preset invalid: {insp['errors']}"
+    assert insp["errors"] == []
+    assert insp["layers"][-1][0]["task_id"] == "task-report"
+
+
 # ── User presets directory (~/.vibe-trading/swarm/presets/) ──────────────────
 
 

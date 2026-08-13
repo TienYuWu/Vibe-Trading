@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from src.agent.context import ContextBuilder
+from src.agent.grounding import GroundingLedger
 from src.agent.memory import WorkspaceMemory
 from src.agent.progress import HeartbeatTimer, ProgressEvent, _set_emitter
 from src.agent.tools import ToolRegistry
@@ -37,7 +38,7 @@ from src.goal.context import (
     goal_needs_continuation,
     goal_progress_tuple,
 )
-from src.providers.chat import ChatLLM, ProviderStreamError
+from src.providers.chat import ChatLLM, LLMRuntimeSnapshot, ProviderStreamError
 from src.providers.content_filter import (
     CONTENT_FILTER_SKIP_MESSAGE,
     MAX_CONSECUTIVE_CONTENT_FILTER_SKIPS,
@@ -46,12 +47,12 @@ from src.providers.content_filter import (
 from src.config.accessor import get_env_config
 from src.config.paths import get_runs_dir, get_sessions_dir
 from src.tools.background_tools import get_background_manager
+from src.config.limits import TOOL_RESULT_LIMIT, truncate_tool_result
 from src.tools.redaction import redact_payload, redact_tool_result
 
 RUNS_DIR = get_runs_dir()
 SESSIONS_DIR = get_sessions_dir()
 KEEP_RECENT = 3
-TOOL_RESULT_LIMIT = 10_000
 LLM_USAGE_ARTIFACT = "llm_usage.json"
 
 COLLAPSE_PRESERVE_RECENT = 6
@@ -60,6 +61,7 @@ COLLAPSE_HEAD = 900
 COLLAPSE_TAIL = 500
 
 TAIL_TOKEN_BUDGET = 20_000
+SUMMARY_CHUNK_CHARS = 80_000
 
 
 def _override(name: str):
@@ -221,6 +223,83 @@ def estimate_tokens(messages: list) -> int:
         Estimated token count.
     """
     return len(json.dumps(messages, default=str, ensure_ascii=False)) // 4
+
+
+def _summary_chunks(msgs: list, limit: int = SUMMARY_CHUNK_CHARS) -> list[str]:
+    """Serialize messages into bounded chunks for lossless summary folding.
+
+    Messages are packed by whole-message boundaries so that ordinary chunks
+    remain valid JSON arrays and a summary call never receives a message that
+    was silently cut off. A single oversized message is split into explicitly
+    labeled raw-JSON fragments instead: the label tells the summarizer that a
+    fragment is not valid JSON by itself, while retaining every character
+    instead of dropping or silently truncating part of the conversation.
+
+    Args:
+        msgs: Messages to serialize and divide into chunks.
+        limit: Maximum number of characters allowed in each returned chunk.
+
+    Returns:
+        JSON-array strings, or labeled raw-JSON fragments for an oversized
+        message, each no longer than ``limit`` characters.
+
+    Raises:
+        ValueError: If ``limit`` cannot accommodate an empty JSON array or an
+            oversized-message fragment label.
+    """
+    if limit < 2:
+        raise ValueError("summary chunk limit must be at least 2 characters")
+
+    serialized = [json.dumps(msg, default=str, ensure_ascii=False) for msg in msgs]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 2  # The opening and closing brackets.
+
+    def flush_current() -> None:
+        nonlocal current, current_len
+        if current:
+            chunks.append("[" + ", ".join(current) + "]")
+            current = []
+            current_len = 2
+
+    for part in serialized:
+        # The two brackets are part of the chunk, so a message that only fits
+        # below ``limit`` as a raw JSON string may still need fragmentation.
+        if len(part) + 2 <= limit:
+            projected_len = current_len + len(part) + (2 if current else 0)
+            if current and projected_len > limit:
+                flush_current()
+            current.append(part)
+            current_len += len(part) + (2 if len(current) > 1 else 0)
+            continue
+
+        flush_current()
+
+        def fragment_prefix(index: int, total: int) -> str:
+            return (
+                f"[fragment {index}/{total} of one oversized message — "
+                "raw JSON slice, not valid JSON on its own]\n"
+            )
+
+        total = 1
+        while True:
+            capacity = limit - len(fragment_prefix(total, total))
+            if capacity <= 0:
+                raise ValueError(
+                    "summary chunk limit is too small for an oversized-message label"
+                )
+            needed = max(1, (len(part) + capacity - 1) // capacity)
+            if needed <= total:
+                break
+            total = needed
+
+        for index in range(1, total + 1):
+            prefix = fragment_prefix(index, total)
+            start = (index - 1) * capacity
+            chunks.append(prefix + part[start : start + capacity])
+
+    flush_current()
+    return chunks or ["[]"]
 
 
 def _microcompact(messages: list) -> None:
@@ -462,8 +541,12 @@ def _is_tool_success(result: str) -> bool:
     """Return True if the tool result does not look like an error response."""
     try:
         data = json.loads(result)
-        if isinstance(data, dict) and data.get("status") == "error":
-            return False
+        if isinstance(data, dict):
+            status = str(data.get("status") or "").strip().casefold()
+            if status in {"error", "failed", "failure", "cancelled", "canceled"}:
+                return False
+            if data.get("ok") is False or data.get("success") is False:
+                return False
     except (json.JSONDecodeError, TypeError):
         pass
     return True
@@ -525,6 +608,20 @@ class AgentLoop:
         """
         self.registry = registry
         self.llm = llm
+        runtime_snapshot = getattr(llm, "runtime_snapshot", None)
+        if not isinstance(runtime_snapshot, LLMRuntimeSnapshot):
+            runtime_cfg = get_env_config().llm
+            runtime_snapshot = LLMRuntimeSnapshot(
+                provider=runtime_cfg.langchain_provider.strip().lower() or "openai",
+                configured_model=(
+                    getattr(llm, "model_name", None)
+                    or runtime_cfg.langchain_model_name
+                ).strip(),
+                reasoning_effort=(
+                    runtime_cfg.langchain_reasoning_effort.strip().lower()
+                ),
+            )
+        self._llm_runtime = runtime_snapshot
         self.memory = memory or WorkspaceMemory()
         self._event_callback = event_callback
         self.max_iterations = max_iterations
@@ -534,6 +631,7 @@ class AgentLoop:
         self._persistent_memory = persistent_memory
         self._run_iteration: int = 0
         self._has_run = False
+        self._grounding: GroundingLedger | None = None
 
     def cancel(self) -> None:
         """Cancel the current loop.
@@ -543,6 +641,63 @@ class AgentLoop:
         next cooperative checkpoint instead of only at the next iteration.
         """
         self._cancel_event.set()
+
+    def _write_run_manifest(self, trace_dir: "Path", messages: List[Dict[str, Any]]) -> None:
+        """Record what methodology produced this run, beside its trace.
+
+        Answers "under what system prompt, which skills, and which tool set was
+        that number produced" -- the question a reproducibility review asks and
+        that nothing in this repo could previously answer. Written once per run
+        as ``run_manifest.json`` next to ``trace.jsonl``.
+
+        The system-prompt hash transitively covers every skill injected at
+        context-build time, because those skills ARE part of the prompt string.
+        Skills pulled mid-run via ``load_skill`` are not, and appear in the
+        trace instead; the manifest says so rather than implying coverage it
+        does not have.
+
+        The prompt itself is never stored -- only its hash. The prompt can carry
+        user memory and workspace content, and this file is a provenance record,
+        not a second copy of the conversation.
+
+        Args:
+            trace_dir: Directory holding this run's trace.
+            messages: The fully built message list about to be sent.
+
+        Note:
+            Never raises. A provenance record that can break a run is worse than
+            a missing one; a failure is logged and the run continues.
+        """
+        try:
+            from datetime import datetime, timezone
+
+            from src.governance.manifest import (
+                build_run_manifest,
+                collect_key_package_versions,
+            )
+
+            system_prompt = next(
+                (m.get("content", "") for m in messages if m.get("role") == "system"), ""
+            )
+            manifest = build_run_manifest(
+                run_id=f"iter-{self._run_iteration + 1}",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                system_prompt=str(system_prompt),
+                tool_names=list(self.registry.tool_names),
+                package_versions=collect_key_package_versions(),
+                extra={
+                    "skill_coverage": (
+                        "skills injected at context-build time are inside the "
+                        "hashed system prompt; skills loaded mid-run via "
+                        "load_skill appear in trace.jsonl, not here"
+                    ),
+                },
+            )
+            path = trace_dir / "run_manifest.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(manifest.to_json(indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("run manifest not written (%s: %s)", type(exc).__name__, exc)
 
     def run(self, user_message: str, history: Optional[List[Dict[str, Any]]] = None, session_id: str = "") -> Dict[str, Any]:
         """Run the ReAct loop synchronously.
@@ -575,6 +730,11 @@ class AgentLoop:
             self.memory.run_dir = str(run_dir)
 
         state_store.save_request(run_dir, user_message, {"session_id": session_id})
+        self._grounding = GroundingLedger(
+            run_dir=run_dir,
+            user_message=user_message,
+            history=history,
+        )
 
         context = ContextBuilder(self.registry, self.memory,
                                   persistent_memory=self._persistent_memory)
@@ -592,6 +752,7 @@ class AgentLoop:
 
         trace_dir = SESSIONS_DIR / session_id if session_id else run_dir
         trace = TraceWriter(trace_dir)
+        self._write_run_manifest(trace_dir, messages)
         if self._run_iteration == 0 and trace.path.exists():
             existing = TraceWriter.read(trace_dir)
             self._run_iteration = max(
@@ -618,6 +779,7 @@ class AgentLoop:
         content_filter_circuit_breaker = False
         empty_model_response_iter: int | None = None
         llm_usage_summary = _new_llm_usage_summary(self.llm)
+        last_response_model: str | None = None
         goal_continuations = 0
         goal_last_progress: tuple[int, int] | None = None
         wrap_up_at = max(1, int(self.max_iterations * 0.8))
@@ -687,10 +849,14 @@ class AgentLoop:
                 reasoning_chars = 0
                 reasoning_tail = ""
                 last_reasoning_emit: float | None = None
+                buffer_text_output = bool(
+                    self._grounding and self._grounding.should_buffer_output
+                )
 
                 def _on_text_chunk(delta: str) -> None:
                     thinking_chunks.append(delta)
-                    self._emit("text_delta", {"delta": delta, "iter": current_iter})
+                    if not buffer_text_output:
+                        self._emit("text_delta", {"delta": delta, "iter": current_iter})
 
                 def _on_reasoning_chunk(delta: str) -> None:
                     # Throttled: long reasoning streams produce hundreds of
@@ -711,10 +877,13 @@ class AgentLoop:
                     ):
                         return
                     last_reasoning_emit = now
-                    self._emit(
-                        "reasoning_delta",
-                        {"iter": current_iter, "chars": reasoning_chars, "tail": reasoning_tail},
-                    )
+                    reasoning_event = {
+                        "iter": current_iter,
+                        "chars": reasoning_chars,
+                    }
+                    if not buffer_text_output:
+                        reasoning_event["tail"] = reasoning_tail
+                    self._emit("reasoning_delta", reasoning_event)
 
                 # On last iteration, drop tool definitions to force text output
                 is_last_iteration = (iteration == self.max_iterations)
@@ -770,6 +939,8 @@ class AgentLoop:
                     break
 
                 usage = getattr(response, "usage_metadata", None)
+                if getattr(response, "response_model", None):
+                    last_response_model = response.response_model
                 usage_delta = _record_llm_usage(
                     run_dir,
                     llm_usage_summary,
@@ -818,7 +989,11 @@ class AgentLoop:
                         value=thinking_text,
                         offload_kind=f"thinking-{current_iter}",
                     )
-                    self._emit("thinking_done", {"iter": current_iter, "content": thinking_text[:500]})
+                    if not buffer_text_output:
+                        self._emit(
+                            "thinking_done",
+                            {"iter": current_iter, "content": thinking_text[:500]},
+                        )
 
                 # Content-filter skip: provider blocked the response — continue
                 # to the next iteration instead of finalising on empty/garbage
@@ -859,6 +1034,50 @@ class AgentLoop:
                             }
                         )
                         break
+                    if self._grounding is not None:
+                        validation = self._grounding.validate_final_answer(final_content)
+                        if not validation.valid:
+                            trace.write_text_entry(
+                                {
+                                    "type": "answer_rejected",
+                                    "iter": current_iter,
+                                    "issues": validation.issues,
+                                },
+                                field="content",
+                                value=final_content,
+                                offload_kind=f"answer-rejected-{current_iter}",
+                            )
+                            react_trace.append(
+                                {
+                                    "type": "answer_rejected",
+                                    "issues": validation.issues,
+                                }
+                            )
+                            messages.append(
+                                {"role": "assistant", "content": final_content}
+                            )
+                            messages.append(
+                                {
+                                    "role": "system",
+                                    "content": self._grounding.correction_prompt(validation),
+                                }
+                            )
+                            final_content = ""
+                            if (
+                                iteration < self.max_iterations
+                                and self._grounding.validation_count < 3
+                            ):
+                                continue
+                            final_content = self._grounding.safe_fallback()
+                            self._emit(
+                                "text_delta",
+                                {"delta": final_content, "iter": current_iter},
+                            )
+                        elif buffer_text_output:
+                            self._emit(
+                                "text_delta",
+                                {"delta": final_content, "iter": current_iter},
+                            )
                     should_continue_goal = False
                     continuation_snapshot = None
                     _max_cont = _goal_max_continuations()
@@ -1004,9 +1223,8 @@ class AgentLoop:
             state_store.mark_success(run_dir)
             final_status = "success"
         elif empty_model_response_iter is not None:
-            _cfg = get_env_config()
-            provider = _cfg.llm.langchain_provider.strip().lower() or "openai"
-            model = getattr(self.llm, "model_name", None) or _cfg.llm.langchain_model_name.strip() or "(unset)"
+            provider = self._llm_runtime.provider
+            model = self._llm_runtime.configured_model or "(unset)"
             final_reason = (
                 "empty_model_response: "
                 f"provider={provider} model={model} iteration {empty_model_response_iter} "
@@ -1041,6 +1259,16 @@ class AgentLoop:
             "iterations": iteration,
             "max_iterations": self.max_iterations,
         }
+        configured_model = self._llm_runtime.configured_model
+        result.update(
+            {
+                "provider": self._llm_runtime.provider,
+                "configured_model": configured_model,
+                "model": last_response_model or configured_model,
+                "model_source": "provider_response" if last_response_model else "configured",
+                "reasoning_effort": self._llm_runtime.reasoning_effort,
+            }
+        )
         if final_reason is not None:
             result["reason"] = final_reason
 
@@ -1078,7 +1306,17 @@ class AgentLoop:
         """
         compact_requested = False
         focus_topic = ""
-        to_execute = []
+        execution_plan: list[tuple[Any, str | None]] = []
+        batch_authorized_symbols = (
+            set(self._grounding.authorized_symbols)
+            if self._grounding is not None
+            else set()
+        )
+        batch_identity_status = (
+            self._grounding.identity_status
+            if self._grounding is not None
+            else "not_required"
+        )
 
         # Cancelled before this turn's tools ran — skip execution entirely.
         if self._cancel_event.is_set():
@@ -1103,18 +1341,132 @@ class AgentLoop:
                 react_trace.append({"type": "tool_skipped", "tool": tc.name})
                 continue
 
-            to_execute.append(tc)
+            if self._grounding is not None:
+                authorization = self._grounding.authorize_tool_call(
+                    tc.name,
+                    tc.arguments,
+                    batch_authorized_symbols=batch_authorized_symbols,
+                    call_id=tc.id,
+                    batch_identity_status=batch_identity_status,
+                )
+                if not authorization.allowed:
+                    execution_plan.append(
+                        (
+                            tc,
+                            authorization.error_payload(
+                                tc.name,
+                                self._grounding.identity_summary(),
+                            ),
+                        )
+                    )
+                    continue
 
-        if not to_execute:
+            execution_plan.append((tc, None))
+
+        if not execution_plan:
             return compact_requested, focus_topic
 
-        # Batch execute: consecutive readonly → parallel, write → serial
-        if len(to_execute) == 1:
-            self._execute_single(to_execute[0], context, messages, trace, react_trace, iteration)
-        else:
-            self._batch_execute(to_execute, context, messages, trace, react_trace, iteration)
+        # Preserve provider tool-result ordering. A synthetic blocked result
+        # acts as a batch boundary, while adjacent authorized calls retain the
+        # existing readonly-parallel/write-serial scheduler.
+        authorized_segment: list[Any] = []
+
+        def flush_authorized_segment() -> None:
+            if not authorized_segment:
+                return
+            if len(authorized_segment) == 1:
+                self._execute_single(
+                    authorized_segment[0],
+                    context,
+                    messages,
+                    trace,
+                    react_trace,
+                    iteration,
+                )
+            else:
+                self._batch_execute(
+                    authorized_segment,
+                    context,
+                    messages,
+                    trace,
+                    react_trace,
+                    iteration,
+                )
+            authorized_segment.clear()
+
+        for tc, blocked_result in execution_plan:
+            if blocked_result is None:
+                authorized_segment.append(tc)
+                continue
+            flush_authorized_segment()
+            self._record_blocked_tool_call(
+                tc,
+                blocked_result,
+                context,
+                messages,
+                trace,
+                react_trace,
+                iteration,
+            )
+        flush_authorized_segment()
 
         return compact_requested, focus_topic
+
+    def _record_blocked_tool_call(
+        self,
+        tc: Any,
+        result: str,
+        context: ContextBuilder,
+        messages: list,
+        trace: TraceWriter,
+        react_trace: list,
+        iteration: int,
+    ) -> None:
+        """Record an identity-gated call without invoking its implementation.
+
+        Args:
+            tc: Provider tool-call object.
+            result: Structured identity-gate error payload.
+            context: Context builder.
+            messages: Conversation messages.
+            trace: Persistent trace writer.
+            react_trace: Compact returned trace.
+            iteration: Current iteration.
+        """
+        args = _normalize_tool_run_dir(tc.arguments, self.memory.run_dir)
+        redacted_args = redact_payload(args)
+        event_args = {key: str(value)[:200] for key, value in redacted_args.items()}
+        self._emit(
+            "tool_call",
+            {
+                "tool": tc.name,
+                "arguments": event_args,
+                "iter": iteration,
+                "call_id": tc.id,
+                "blocked": True,
+            },
+        )
+        trace.write(
+            {
+                "type": "tool_call",
+                "iter": iteration,
+                "tool": tc.name,
+                "call_id": tc.id,
+                "args": redacted_args,
+                "blocked": True,
+            }
+        )
+        self._finalize_tool_result(
+            tc,
+            result,
+            0,
+            context,
+            messages,
+            trace,
+            react_trace,
+            iteration,
+            update_memory=False,
+        )
 
     def _batch_execute(
         self,
@@ -1448,6 +1800,8 @@ class AgentLoop:
         trace: TraceWriter,
         react_trace: list,
         iteration: int,
+        *,
+        update_memory: bool = True,
     ) -> None:
         """Record a tool result: update memory, append message, write trace, emit event.
 
@@ -1460,15 +1814,35 @@ class AgentLoop:
             trace: TraceWriter.
             react_trace: React trace list.
             iteration: Current iteration.
+            update_memory: Whether this call reached the tool implementation.
         """
-        self._update_memory(tc.name)
+        if update_memory:
+            self._update_memory(tc.name)
 
         success = _is_tool_success(result)
         if success:
             self._called_ok.add(tc.name)
 
+        if self._grounding is not None:
+            self._grounding.ingest_tool_result(
+                tool_name=tc.name,
+                arguments=_normalize_tool_run_dir(tc.arguments, self.memory.run_dir),
+                result=result,
+                call_id=tc.id,
+                success=success,
+            )
+            if tc.name == "search_symbol":
+                trace.write(
+                    {
+                        "type": "identity_state",
+                        "iter": iteration,
+                        "call_id": tc.id,
+                        "identity": self._grounding.identity_summary(),
+                    }
+                )
+
         status = "ok" if success else "error"
-        truncated = result[:TOOL_RESULT_LIMIT]
+        truncated = truncate_tool_result(result)
         messages.append(context.format_tool_result(tc.id, tc.name, truncated))
 
         # One redaction feeds every subscriber below: the persisted trace
@@ -1563,20 +1937,28 @@ class AgentLoop:
         # Build focus section
         focus_section = _FOCUS_SECTION.format(topic=focus_topic) if focus_topic else ""
 
-        # Build summary prompt (structured template or iterative update)
-        conv_text = json.dumps(head, default=str, ensure_ascii=False)[:80000]
+        # Fold every head chunk so no message falls between the summary prompt
+        # and the preserved tail. The first fresh chunk gets the full
+        # structured handoff; subsequent chunks incrementally update it.
+        chunks = _summary_chunks(head)
+        logger.info("Auto compact: folding %d summary chunks", len(chunks))
+        summary = self._previous_summary or ""
+        for conv_text in chunks:
+            # Structured template while there is still nothing to update — that
+            # covers a fresh session's first chunk and the corner case where
+            # every fold so far returned empty content.
+            if not summary:
+                prompt = _STRUCTURED_SUMMARY_PROMPT.format(focus_section=focus_section) + conv_text
+            else:
+                prompt = _ITERATIVE_UPDATE_PROMPT.format(
+                    previous_summary=summary,
+                    new_turns=conv_text,
+                    focus_section=focus_section,
+                )
 
-        if self._previous_summary:
-            prompt = _ITERATIVE_UPDATE_PROMPT.format(
-                previous_summary=self._previous_summary,
-                new_turns=conv_text,
-                focus_section=focus_section,
-            )
-        else:
-            prompt = _STRUCTURED_SUMMARY_PROMPT.format(focus_section=focus_section) + conv_text
-
-        summary_resp = self.llm.chat([{"role": "user", "content": prompt}])
-        summary = summary_resp.content or ""
+            summary_resp = self.llm.chat([{"role": "user", "content": prompt}])
+            if summary_resp.content:
+                summary = summary_resp.content
         self._previous_summary = summary
 
         tokens_before = estimate_tokens(messages)
@@ -1586,6 +1968,7 @@ class AgentLoop:
                 "iter": iteration,
                 "tokens_before": tokens_before,
                 "focus_topic": focus_topic or "(none)",
+                "summary_chunks": len(chunks),
             },
             field="summary",
             value=summary,

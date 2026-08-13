@@ -12,6 +12,7 @@ export const TOOL_LABELS: Record<string, string> = {
   bash: "Run command",
   read_url: "Read webpage",
   read_document: "Read document",
+  options_payoff: "Analyze options payoff",
   get_market_data: "Get market data",
   screen_market: "Screen market",
   factor_analysis: "Analyze factors",

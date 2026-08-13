@@ -10,12 +10,14 @@ import json
 import os
 import sys as _sys
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
-from src.config.accessor import reset_env_config
+from src.config.accessor import get_env_value, reset_env_config
 
 # Agent root (agent/) — resolved from this file's location (agent/src/api/).
 _AGENT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -74,6 +76,30 @@ class UpdateLLMSettingsRequest(BaseModel):
     reasoning_effort: Optional[str] = None
 
 
+class ListLLMModelsRequest(BaseModel):
+    """Resolve live model choices without persisting credentials or settings."""
+
+    provider: str = Field(..., min_length=1)
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+ModelDiscoveryWarningCode = Literal[
+    "oauth_discovery_unsupported",
+    "api_key_required",
+    "model_list_unavailable",
+]
+
+
+class LLMModelsResponse(BaseModel):
+    """Model IDs suitable for an editable settings combobox."""
+
+    provider: str
+    models: List[str]
+    source: str
+    warning_code: Optional[ModelDiscoveryWarningCode] = None
+
+
 class DataSourceSettingsResponse(BaseModel):
     """Current data source credential settings."""
 
@@ -126,6 +152,19 @@ LLM_API_KEY_PLACEHOLDERS = {"", "sk-or-v1-your-key-here", "sk-xxx", "xxx", "gsk_
 TUSHARE_TOKEN_PLACEHOLDERS = {"", "your-tushare-token"}
 
 
+def _desktop_secure_credential_names() -> set[str]:
+    """Return secrets owned by the desktop host when secure storage is active."""
+    names = {"TUSHARE_TOKEN", "QVERIS_API_KEY"}
+    names.update(
+        provider.api_key_env for provider in LLM_PROVIDERS if provider.api_key_env
+    )
+    return names
+
+
+def _desktop_secure_credentials_enabled() -> bool:
+    return get_env_value("VIBE_TRADING_DESKTOP_SECURE_CREDENTIALS") == "1"
+
+
 # ---------------------------------------------------------------------------
 # Host access helpers (late-binding for test monkeypatch compat)
 # ---------------------------------------------------------------------------
@@ -172,12 +211,121 @@ def _read_settings_env_values() -> Dict[str, str]:
     env_example_path = host.ENV_EXAMPLE_PATH
     read_env = host._read_env_values
     if env_path.exists():
-        return read_env(env_path)
-    if legacy_env_path.exists():
-        return read_env(legacy_env_path)
-    if env_example_path.exists():
-        return read_env(env_example_path)
-    return {}
+        values = read_env(env_path)
+    elif legacy_env_path.exists():
+        values = read_env(legacy_env_path)
+    elif env_example_path.exists():
+        values = read_env(env_example_path)
+    else:
+        values = {}
+
+    if _desktop_secure_credentials_enabled():
+        for name in _desktop_secure_credential_names():
+            runtime_value = get_env_value(name)
+            if runtime_value:
+                values[name] = runtime_value
+            else:
+                values.pop(name, None)
+    return values
+
+
+def _model_list_url(base_url: str) -> str:
+    """Return the OpenAI-compatible model-list endpoint for a provider URL."""
+    url = base_url.strip().rstrip("/")
+    for suffix in ("/chat/completions", "/responses"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+            break
+    return f"{url}/models"
+
+
+def _validate_model_base_url(base_url: str) -> str:
+    """Accept HTTP(S) provider endpoints without embedded URL credentials."""
+    normalized = base_url.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("Provider base URL must be an HTTP(S) URL without embedded credentials")
+    return normalized
+
+
+def _extract_model_ids(payload: Any) -> List[str]:
+    """Normalize common OpenAI-compatible model-list response shapes."""
+    if not isinstance(payload, dict):
+        return []
+    records = payload.get("data")
+    if not isinstance(records, list):
+        records = payload.get("models")
+    if not isinstance(records, list):
+        return []
+
+    model_ids: set[str] = set()
+    for item in records:
+        if isinstance(item, str):
+            model_id = item.strip()
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("name") or "").strip()
+        else:
+            continue
+        if model_id:
+            model_ids.add(model_id)
+    return sorted(model_ids, key=str.casefold)[:1000]
+
+
+async def _list_provider_models(
+    provider: LLMProviderOption,
+    *,
+    base_url: str,
+    api_key: str,
+) -> LLMModelsResponse:
+    """Best-effort live model discovery with a safe editable fallback."""
+    fallback = [provider.default_model]
+    if provider.auth_type == "oauth":
+        return LLMModelsResponse(
+            provider=provider.name,
+            models=fallback,
+            source="default",
+            warning_code="oauth_discovery_unsupported",
+        )
+    if provider.api_key_required and not api_key:
+        return LLMModelsResponse(
+            provider=provider.name,
+            models=fallback,
+            source="default",
+            warning_code="api_key_required",
+        )
+
+    if provider.name == "ollama" and not base_url.rstrip("/").endswith("/v1"):
+        base_url = f"{base_url.rstrip('/')}/v1"
+
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=False) as client:
+            response = await client.get(_model_list_url(base_url), headers=headers)
+            response.raise_for_status()
+            models = _extract_model_ids(response.json())
+    except (httpx.HTTPError, ValueError):
+        return LLMModelsResponse(
+            provider=provider.name,
+            models=fallback,
+            source="default",
+            warning_code="model_list_unavailable",
+        )
+
+    discovered = bool(models)
+    if provider.default_model not in models:
+        models.insert(0, provider.default_model)
+    return LLMModelsResponse(
+        provider=provider.name,
+        models=models or fallback,
+        source="provider" if discovered else "default",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +449,10 @@ def _persist_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
     merged = dict(updates)
     if not target.exists() and legacy != target and legacy.exists():
         merged = {**host._read_env_values(legacy), **updates}
+    if _desktop_secure_credentials_enabled():
+        # Empty known secret keys in dotenv while preserving the decrypted
+        # environment values injected by Electron for this process.
+        merged.update({name: "" for name in _desktop_secure_credential_names()})
     try:
         host._write_env_values(target, merged)
     except OSError as exc:
@@ -311,7 +463,7 @@ def _persist_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
                 "~/.vibe-trading/.env"
             ),
         ) from exc
-    return host._read_env_values(target)
+    return _read_settings_env_values()
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +585,52 @@ def register_settings_routes(
         saved_values = _persist_settings_updates(updates)
         _sync_runtime_env(provider, updates)
         return _build_llm_settings_response(saved_values)
+
+    @app.post(
+        "/settings/llm/models",
+        response_model=LLMModelsResponse,
+        dependencies=[Depends(require_settings_write_auth)],
+    )
+    async def list_llm_models(payload: ListLLMModelsRequest):
+        """Load provider model IDs for an editable UI combobox."""
+        provider_name = payload.provider.strip().lower()
+        provider = LLM_PROVIDER_BY_NAME.get(provider_name)
+        if provider is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported LLM provider"
+            )
+
+        current_values = _read_settings_env_values()
+        requested_base_url = (payload.base_url or "").strip()
+        saved_base_url = (
+            current_values.get(provider.base_url_env) or provider.default_base_url
+        ).strip()
+        try:
+            base_url = _validate_model_base_url(requested_base_url or saved_base_url)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        api_key = (payload.api_key or "").strip()
+        if not api_key and provider.api_key_env:
+            trusted_base_urls = {
+                _validate_model_base_url(candidate)
+                for candidate in (
+                    saved_base_url,
+                    provider.default_base_url,
+                    *provider.base_url_options,
+                )
+                if candidate.strip()
+            }
+            if not requested_base_url or base_url in trusted_base_urls:
+                saved_key = current_values.get(provider.api_key_env, "").strip()
+                if _host()._is_configured_secret(saved_key, LLM_API_KEY_PLACEHOLDERS):
+                    api_key = saved_key
+        return await _list_provider_models(
+            provider,
+            base_url=base_url,
+            api_key=api_key,
+        )
 
     @app.get(
         "/settings/data-sources",

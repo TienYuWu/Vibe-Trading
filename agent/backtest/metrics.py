@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from backtest.models import TradeRecord
+from backtest.models import FillRecord, TradeRecord
 
 # ─── Annualisation factor mapping ───
 
@@ -443,6 +443,31 @@ def calc_trade_turnover_series(
     return (traded_margin / denominator).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
+def calc_fill_turnover_series(
+    fills: List[FillRecord],
+    equity_curve: pd.Series,
+) -> pd.Series:
+    """Per-bar turnover from immutable execution-fill evidence."""
+    if equity_curve is None or equity_curve.empty:
+        return pd.Series(dtype=float)
+
+    traded_margin = pd.Series(0.0, index=equity_curve.index, dtype=float)
+    for fill in fills:
+        try:
+            margin_value = float(fill.margin)
+        except (TypeError, ValueError):
+            continue
+        if (
+            fill.timestamp in traded_margin.index
+            and np.isfinite(margin_value)
+            and margin_value > 0
+        ):
+            traded_margin.loc[fill.timestamp] += margin_value
+
+    denominator = 2.0 * equity_curve.abs().replace(0.0, np.nan)
+    return (traded_margin / denominator).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
 def calc_metrics(
     equity_curve: pd.Series,
     trades: List[TradeRecord],
@@ -519,7 +544,11 @@ def calc_metrics(
         sharpe = 0.0
 
     # Drawdown
-    peak = equity_curve.cummax()
+    # The account starts at ``initial_cash`` before the first recorded bar, so
+    # that value is the initial high-water mark.  Using only observed equity
+    # understates a first-bar loss and makes drawdown nonsensical after equity
+    # crosses zero.
+    peak = equity_curve.cummax().clip(lower=float(initial_cash))
     dd = (equity_curve - peak) / peak.replace(0, 1)
     max_dd = float(dd.min())
 
@@ -553,10 +582,13 @@ def calc_metrics(
     bench_return = 0.0
     excess = 0.0
     ir = 0.0
+    tracking_error = 0.0
+    bench_beta = 0.0
     if bench_ret is not None and len(bench_ret) > 0:
         bench_return = float((1 + bench_ret).prod() - 1)
         excess = total_ret - bench_return
-        active_ret = port_ret - bench_ret.reindex(port_ret.index).fillna(0.0)
+        aligned_bench = bench_ret.reindex(port_ret.index).fillna(0.0)
+        active_ret = port_ret - aligned_bench
         # Same ddof=1 small-sample guard as ``vol`` / ``downside_std`` so the
         # information ratio stays finite for a single-observation series.
         active_std = float(active_ret.std()) if len(active_ret) > 1 and returns_finite else 0.0
@@ -567,6 +599,18 @@ def calc_metrics(
         )
         if not np.isfinite(ir):
             ir = 0.0
+        # The information ratio's own denominator, annualised. A
+        # benchmark-relative mandate is written around this number, and it was
+        # being computed and thrown away.
+        tracking_error = active_std * np.sqrt(bpy) if returns_finite else 0.0
+        if not np.isfinite(tracking_error):
+            tracking_error = 0.0
+        bench_var = float(aligned_bench.var()) if len(aligned_bench) > 1 else 0.0
+        if returns_finite and bench_var > 0:
+            covariance = float(port_ret.cov(aligned_bench))
+            bench_beta = covariance / bench_var
+            if not np.isfinite(bench_beta):
+                bench_beta = 0.0
 
     return {
         "final_value": float(equity_curve.iloc[-1]),
@@ -585,6 +629,8 @@ def calc_metrics(
         "benchmark_return": round(bench_return, 6),
         "excess_return": round(excess, 6),
         "information_ratio": round(ir, 4),
+        "tracking_error": round(float(tracking_error), 6),
+        "benchmark_beta": round(float(bench_beta), 4),
         "avg_turnover": round(avg_turnover, 6),
         "total_turnover": round(total_turnover, 6),
     }
@@ -599,5 +645,6 @@ def _empty_metrics(initial_cash: float) -> Dict[str, Any]:
         "win_rate": 0, "profit_loss_ratio": 0, "profit_factor": 0,
         "max_consecutive_loss": 0, "avg_holding_days": 0, "trade_count": 0,
         "benchmark_return": 0, "excess_return": 0, "information_ratio": 0,
+        "tracking_error": 0.0, "benchmark_beta": 0.0,
         "avg_turnover": 0.0, "total_turnover": 0.0,
     }

@@ -245,7 +245,9 @@ LOADER_CACHE_ROOT_ENV = "VIBE_TRADING_DATA_CACHE_ROOT"
 _LOADER_CACHE_TRUE_VALUES = {"1", "true", "yes", "on"}
 # Bump when the key payload or on-disk layout changes so stale entries are
 # simply never matched (old files become unreachable garbage, safe to delete).
-_LOADER_CACHE_VERSION = 3
+# v4: baostock volume normalized from shares to lots (#1062) — entries cached
+# under the pre-normalization unit must never be served again.
+_LOADER_CACHE_VERSION = 4
 
 
 def loader_cache_enabled() -> bool:
@@ -617,7 +619,17 @@ def _duckdb_sql_string(path: Path) -> str:
 
 @runtime_checkable
 class DataLoaderProtocol(Protocol):
-    """Interface that every data source loader must satisfy."""
+    """Interface that every data source loader must satisfy.
+
+    Optional class attribute ``volume_units: dict[str, str]`` (not part of the
+    structural check so existing loaders keep working): declares the unit of
+    the ``volume`` column per market, keyed by market name — e.g.
+    ``{"a_share": "lots", "hk_equity": "shares"}``. ``"lots"`` means board
+    lots (1 A-share lot = 100 shares); ``"shares"`` means single shares.
+    Sources differ natively (see HKUDS/Vibe-Trading#1062), so consumers must
+    read the per-symbol ``volume_unit`` from ``_provenance`` instead of
+    assuming a unit; a missing market entry surfaces as ``null`` (undeclared).
+    """
 
     name: str
     markets: set[str]

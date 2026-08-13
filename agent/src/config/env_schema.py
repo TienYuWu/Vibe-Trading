@@ -140,6 +140,9 @@ class LLMConfig(_EnvBase):
         default="https://chatgpt.com/backend-api/codex/responses",
     )
     openai_model: str = Field(alias="OPENAI_MODEL", default="")
+    vibe_trading_disable_http_proxy: EnvBool = Field(
+        alias="VIBE_TRADING_DISABLE_HTTP_PROXY", default=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +170,18 @@ class DataConfig(_EnvBase):
     fred_api_key: str = Field(alias="FRED_API_KEY", default="")
     vibe_trading_iwencai_key: str = Field(alias="VIBE_TRADING_IWENCAI_KEY", default="")
     vibe_trading_sec_ua: str = Field(alias="VIBE_TRADING_SEC_UA", default="")
+    # 13F scan bounds. No gt=0 constraint: a non-positive override must fall
+    # back to the default like any other bad value, and a constraint would
+    # raise a ValidationError at config load instead.
+    vibe_trading_sec_13f_max_xml_mb: float = Field(
+        alias="VIBE_TRADING_SEC_13F_MAX_XML_MB", default=25.0
+    )
+    vibe_trading_sec_13f_budget_s: float = Field(
+        alias="VIBE_TRADING_SEC_13F_BUDGET_S", default=120.0
+    )
+    vibe_trading_sec_ftd_url: str = Field(alias="VIBE_TRADING_SEC_FTD_URL", default="")
+    vibe_trading_sec_ftd_files: int = Field(alias="VIBE_TRADING_SEC_FTD_FILES", default=1)
+    vibe_trading_openalex_mailto: str = Field(alias="VIBE_TRADING_OPENALEX_MAILTO", default="")
     vibe_tw_stock_db: str = Field(alias="VIBE_TW_STOCK_DB", default="")
     finmind_token: str = Field(alias="FINMIND_TOKEN", default="")
     vibe_trading_data_cache: EnvBool = Field(alias="VIBE_TRADING_DATA_CACHE", default=False)
@@ -179,6 +194,8 @@ class DataConfig(_EnvBase):
     longbridge_app_key: str = Field(alias="LONGBRIDGE_APP_KEY", default="")
     longbridge_app_secret: str = Field(alias="LONGBRIDGE_APP_SECRET", default="")
     longbridge_access_token: str = Field(alias="LONGBRIDGE_ACCESS_TOKEN", default="")
+    etoro_api_key: str = Field(alias="ETORO_API_KEY", default="")
+    etoro_user_key: str = Field(alias="ETORO_USER_KEY", default="")
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +269,13 @@ class APIConfig(_EnvBase):
     enable_session_runtime: EnvBool = Field(alias="ENABLE_SESSION_RUNTIME", default=True)
     vibe_trading_trust_docker_loopback: EnvBool = Field(
         alias="VIBE_TRADING_TRUST_DOCKER_LOOPBACK", default=False,
+    )
+    # Ship the Content-Security-Policy as Report-Only instead of enforcing it.
+    # The policy is enforced by default; this is a rollback switch for a
+    # deployment that serves extra assets the stock policy does not cover
+    # (a reverse proxy injecting a script, a customized frontend build).
+    vibe_trading_csp_report_only: EnvBool = Field(
+        alias="VIBE_TRADING_CSP_REPORT_ONLY", default=False,
     )
     vibe_trading_enable_shell_tools: EnvBool = Field(
         alias="VIBE_TRADING_ENABLE_SHELL_TOOLS", default=False,
@@ -328,6 +352,15 @@ class AgentTuningConfig(_EnvBase):
     vibe_trading_enable_scheduler: EnvBool = Field(
         alias="VIBE_TRADING_ENABLE_SCHEDULER", default=False,
     )
+    vibe_trading_scheduler_max_consecutive_failures: int = Field(
+        alias="VIBE_TRADING_SCHEDULER_MAX_CONSECUTIVE_FAILURES", default=3,
+    )
+    vibe_trading_scheduler_retry_base_delay_ms: int = Field(
+        alias="VIBE_TRADING_SCHEDULER_RETRY_BASE_DELAY_MS", default=60_000,
+    )
+    vibe_trading_scheduler_retry_max_delay_ms: int = Field(
+        alias="VIBE_TRADING_SCHEDULER_RETRY_MAX_DELAY_MS", default=3_600_000,
+    )
     vibe_trading_channels_auto_start: EnvBool = Field(
         alias="VIBE_TRADING_CHANNELS_AUTO_START", default=False,
     )
@@ -336,6 +369,7 @@ class AgentTuningConfig(_EnvBase):
     )
     vibe_trading_bench_workers: int = Field(alias="VIBE_TRADING_BENCH_WORKERS", default=0)
     vibe_trading_search_backends: str = Field(alias="VIBE_TRADING_SEARCH_BACKENDS", default="")
+    vibe_trading_slash_arg_max: int = Field(alias="VIBE_TRADING_SLASH_ARG_MAX", default=600)
     vibe_trading_search_bing_fallback: EnvBool = Field(
         alias="VIBE_TRADING_SEARCH_BING_FALLBACK", default=True,
     )
@@ -358,6 +392,7 @@ class PathConfig(_EnvBase):
 
     vibe_trading_hypotheses_path: str = Field(alias="VIBE_TRADING_HYPOTHESES_PATH", default="")
     vibe_trading_goal_db_path: str = Field(alias="VIBE_TRADING_GOAL_DB_PATH", default="")
+    vibe_trading_playbook_dir: str = Field(alias="VIBE_TRADING_PLAYBOOK_DIR", default="")
     vibe_trading_swarm_agent_config: str = Field(
         alias="VIBE_TRADING_SWARM_AGENT_CONFIG", default="",
     )

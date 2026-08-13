@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+from copy import copy
 from urllib.parse import urlparse
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -31,6 +32,218 @@ try:
 except ImportError:
     ChatOpenAI = None  # type: ignore
 
+try:
+    from openai import Omit as OpenAIOmit
+except ImportError:
+    OpenAIOmit = None  # type: ignore
+
+try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore
+
+
+def _build_proxy_free_http_clients() -> tuple[Any, Any]:
+    """Build sync and async HTTPX clients that ignore proxy environment vars.
+
+    Supplying an explicit transport prevents ``httpx.Client`` from installing
+    proxy mounts discovered from HTTP(S)_PROXY.  ``trust_env`` remains enabled
+    on the transports so SSL_CERT_FILE and SSL_CERT_DIR still work for private
+    certificate authorities.
+
+    Returns:
+        A ``(sync_client, async_client)`` pair for the OpenAI SDK.
+
+    Raises:
+        RuntimeError: If HTTPX is unavailable while proxy disabling is enabled.
+    """
+    if httpx is None:
+        raise RuntimeError(
+            "VIBE_TRADING_DISABLE_HTTP_PROXY requires the httpx package"
+        )
+    sync_transport = httpx.HTTPTransport(proxy=None, trust_env=True)
+    async_transport = httpx.AsyncHTTPTransport(proxy=None, trust_env=True)
+    return (
+        httpx.Client(transport=sync_transport),
+        httpx.AsyncClient(transport=async_transport),
+    )
+
+
+_AMBIENT_OPENAI_HEADER_ENV_VARS = (
+    "OPENAI_CUSTOM_HEADERS",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT_ID",
+)
+
+
+class _ResponsesMappingEvent:
+    """Attribute view over a raw OpenAI Responses stream event mapping."""
+
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        self._values = dict(values)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._values[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def model_dump(self, *, exclude_none: bool = False, **_: Any) -> dict[str, Any]:
+        """Expose the Pydantic method expected by LangChain's converter."""
+        if exclude_none:
+            return {
+                key: value for key, value in self._values.items() if value is not None
+            }
+        return dict(self._values)
+
+
+def _normalize_responses_stream_event(event: Any) -> Any:
+    """Adapt raw mapping events to the attribute shape LangChain expects.
+
+    Native OpenAI SDK streams yield typed response event objects. Some
+    OpenAI-compatible gateways yield the same wire events as plain dicts;
+    langchain-openai's Responses converter accesses ``event.type`` and a few
+    nested attributes directly. Preserve typed events unchanged and adapt only
+    the mapping form.
+    """
+    if not isinstance(event, Mapping):
+        return event
+
+    values = dict(event)
+    for key in ("annotation", "item"):
+        nested = values.get(key)
+        if isinstance(nested, Mapping):
+            values[key] = _ResponsesMappingEvent(nested)
+    return _ResponsesMappingEvent(values)
+
+
+class _ResponsesSyncStream:
+    """Proxy a sync Responses stream and normalize each yielded event."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._entered: Any = None
+
+    def __enter__(self) -> "_ResponsesSyncStream":
+        self._entered = self._stream.__enter__()
+        return self
+
+    def __exit__(self, *args: Any) -> Any:
+        return self._stream.__exit__(*args)
+
+    def __iter__(self) -> Iterator[Any]:
+        source = self._entered if self._entered is not None else self._stream
+        for event in source:
+            yield _normalize_responses_stream_event(event)
+
+    def parse(self, *args: Any, **kwargs: Any) -> "_ResponsesSyncStream":
+        """Keep raw-response ``parse()`` streams behind the same proxy."""
+        return _ResponsesSyncStream(self._stream.parse(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+class _ResponsesAsyncStream:
+    """Proxy an async Responses stream and normalize each yielded event."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._entered: Any = None
+
+    async def __aenter__(self) -> "_ResponsesAsyncStream":
+        self._entered = await self._stream.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: Any) -> Any:
+        return await self._stream.__aexit__(*args)
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[Any]:
+        source = self._entered if self._entered is not None else self._stream
+        async for event in source:
+            yield _normalize_responses_stream_event(event)
+
+    def parse(self, *args: Any, **kwargs: Any) -> "_ResponsesAsyncStream":
+        """Keep async raw-response ``parse()`` streams behind the proxy."""
+        return _ResponsesAsyncStream(self._stream.parse(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+class _ResponsesSyncResource:
+    """Proxy the sync Responses resource without changing non-stream calls."""
+
+    def __init__(self, resource: Any) -> None:
+        self._resource = resource
+
+    def create(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._resource.create(*args, **kwargs)
+        if kwargs.get("stream"):
+            return _ResponsesSyncStream(result)
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resource, name)
+
+
+class _ResponsesAsyncResource:
+    """Proxy the async Responses resource without changing non-stream calls."""
+
+    def __init__(self, resource: Any) -> None:
+        self._resource = resource
+
+    async def create(self, *args: Any, **kwargs: Any) -> Any:
+        result = await self._resource.create(*args, **kwargs)
+        if kwargs.get("stream"):
+            return _ResponsesAsyncStream(result)
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resource, name)
+
+
+class _ResponsesSyncClient:
+    """Shallow client proxy used for one sync stream call."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.responses = _ResponsesSyncResource(client.responses)
+        raw_response = getattr(client, "with_raw_response", None)
+        if raw_response is not None:
+            self.with_raw_response = _ResponsesSyncClient(raw_response)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
+class _ResponsesAsyncClient:
+    """Shallow client proxy used for one async stream call."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.responses = _ResponsesAsyncResource(client.responses)
+        raw_response = getattr(client, "with_raw_response", None)
+        if raw_response is not None:
+            self.with_raw_response = _ResponsesAsyncClient(raw_response)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
+def _openai_custom_header_names(raw: str | None) -> tuple[str, ...]:
+    """Return header names parsed by the OpenAI SDK environment format."""
+    names: list[str] = []
+    for line in (raw or "").split("\n"):
+        colon = line.find(":")
+        if colon >= 0:
+            names.append(line[:colon].strip())
+    return tuple(dict.fromkeys(names))
+
 
 if ChatOpenAI is not None:
 
@@ -48,13 +261,66 @@ if ChatOpenAI is not None:
         """
 
         _vibe_provider: Optional[str] = PrivateAttr(default=None)
+        _vibe_api_key: str = PrivateAttr(default="")
+        _vibe_ambient_header_names: tuple[str, ...] = PrivateAttr(default=())
+        _vibe_has_explicit_authorization: bool = PrivateAttr(default=False)
 
         def __init__(
-            self, *args: Any, vibe_provider: str | None = None, **kwargs: Any
+            self,
+            *args: Any,
+            vibe_provider: str | None = None,
+            vibe_api_key: str | None = None,
+            **kwargs: Any,
         ) -> None:
             """Initialize while retaining the resolved provider name."""
+            explicit_headers = kwargs.get("default_headers")
+            explicit_names = (
+                {str(name) for name in explicit_headers}
+                if isinstance(explicit_headers, Mapping)
+                else set()
+            )
+            explicit_names_lower = {name.lower() for name in explicit_names}
+            ambient_names = _openai_custom_header_names(
+                os.getenv("OPENAI_CUSTOM_HEADERS")  # noqa: env-gate — SDK header isolation
+            )
             super().__init__(*args, **kwargs)
             self._vibe_provider = vibe_provider
+            self._vibe_api_key = vibe_api_key or ""
+            self._vibe_ambient_header_names = tuple(
+                name for name in ambient_names if name not in explicit_names
+            )
+            self._vibe_has_explicit_authorization = (
+                "authorization" in explicit_names_lower
+            )
+
+        def _provider_scoped_extra_headers(self) -> dict[str, Any]:
+            """Remove ambient OpenAI-only headers from named relay requests."""
+            provider = (self._vibe_provider or "").strip().lower()
+            if not provider or provider == "openai" or OpenAIOmit is None:
+                return {}
+
+            overrides: dict[str, Any] = {
+                "OpenAI-Organization": OpenAIOmit(),
+                "OpenAI-Project": OpenAIOmit(),
+            }
+            ambient_authorization = False
+            for name in self._vibe_ambient_header_names:
+                overrides[name] = OpenAIOmit()
+                ambient_authorization = (
+                    ambient_authorization or name.lower() == "authorization"
+                )
+
+            # OPENAI_CUSTOM_HEADERS can override the SDK's normal Bearer header.
+            # Remove every captured spelling, then restore the selected provider
+            # credential under one canonical name so casing variants cannot
+            # produce duplicate Authorization values.
+            if (
+                ambient_authorization
+                and not self._vibe_has_explicit_authorization
+                and self._vibe_api_key
+            ):
+                overrides["Authorization"] = f"Bearer {self._vibe_api_key}"
+            return overrides
 
         def _capabilities(self):
             model = (
@@ -254,6 +520,27 @@ if ChatOpenAI is not None:
                 self._capture(choice["message"], gen.message)
             return result
 
+        def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            """Route Responses streams through the mapping-compatible adapter."""
+            if self._use_responses_api({**kwargs, **self.model_kwargs}):
+                cloned = copy(self)
+                cloned.root_client = _ResponsesSyncClient(self.root_client)
+                return super(ChatOpenAIWithReasoning, cloned)._stream(*args, **kwargs)
+            return super()._stream(*args, **kwargs)
+
+        async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            """Async route matching ``_stream`` for Responses compatibility."""
+            if self._use_responses_api({**kwargs, **self.model_kwargs}):
+                cloned = copy(self)
+                cloned.root_async_client = _ResponsesAsyncClient(self.root_async_client)
+                async for chunk in super(ChatOpenAIWithReasoning, cloned)._astream(
+                    *args, **kwargs
+                ):
+                    yield chunk
+            else:
+                async for chunk in super()._astream(*args, **kwargs):
+                    yield chunk
+
         def _convert_chunk_to_generation_chunk(  # type: ignore[override]
             self,
             chunk: dict,
@@ -285,26 +572,34 @@ if ChatOpenAI is not None:
             is absent, breaking ReAct continuations after a tool call (#39).
             """
             payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-            messages = super()._convert_input(input_).to_messages()
-            caps = self._capabilities()
-            for i, m in enumerate(payload["messages"]):
-                if m.get("role") != "assistant":
-                    continue
-                source_message = messages[i]
-                if caps.normalize_assistant_content and m.get("content") is None:
-                    m["content"] = ""
-                if caps.send_reasoning_content:
-                    m["reasoning_content"] = source_message.additional_kwargs.get(
-                        "reasoning_content", ""
-                    )
-                else:
-                    m.pop("reasoning_content", None)
-                if caps.gemini_thought_signatures:
-                    self._inject_tool_call_thought_signatures(
-                        m.get("tool_calls"), source_message
-                    )
-                else:
-                    self._strip_tool_call_extra_content(m.get("tool_calls"))
+            if "messages" in payload:
+                messages = super()._convert_input(input_).to_messages()
+                caps = self._capabilities()
+                for i, m in enumerate(payload["messages"]):
+                    if m.get("role") != "assistant":
+                        continue
+                    source_message = messages[i]
+                    if caps.normalize_assistant_content and m.get("content") is None:
+                        m["content"] = ""
+                    if caps.send_reasoning_content:
+                        m["reasoning_content"] = source_message.additional_kwargs.get(
+                            "reasoning_content", ""
+                        )
+                    else:
+                        m.pop("reasoning_content", None)
+                    if caps.gemini_thought_signatures:
+                        self._inject_tool_call_thought_signatures(
+                            m.get("tool_calls"), source_message
+                        )
+                    else:
+                        self._strip_tool_call_extra_content(m.get("tool_calls"))
+
+            scoped_headers = self._provider_scoped_extra_headers()
+            if scoped_headers:
+                existing_headers = payload.get("extra_headers")
+                if isinstance(existing_headers, Mapping):
+                    scoped_headers.update(existing_headers)
+                payload["extra_headers"] = scoped_headers
             return payload
 
 else:
@@ -391,6 +686,56 @@ def _redact_env_flag(name: str) -> str:
     """Report whether an env var is set without exposing its value."""
     value = os.getenv(name, "")  # noqa: env-gate — diagnostic redaction helper
     return "set" if value else "unset"
+
+
+def _header_value_diagnostic(value: str) -> dict[str, Any]:
+    """Describe a possible HTTP header value without exposing its contents."""
+    return {
+        "set": bool(value),
+        "length": len(value),
+        "ascii_only": value.isascii(),
+    }
+
+
+def _credential_env_source(api_key_env: str | None) -> str:
+    """Return the env name supplying the selected provider credential."""
+    if api_key_env and os.getenv(api_key_env):  # noqa: env-gate — dynamic key source
+        return api_key_env
+    if os.getenv("OPENAI_API_KEY"):  # noqa: env-gate — compatibility fallback
+        return "OPENAI_API_KEY"
+    return api_key_env or "built_in"
+
+
+def _validate_authorization_credential(value: str, *, source: str) -> None:
+    """Reject credentials that cannot form a legal ASCII Bearer header."""
+    if not value:
+        return
+    if not value.isascii():
+        raise RuntimeError(
+            f"{source} contains non-ASCII characters and cannot be sent in an "
+            "HTTP Authorization header. Replace it with the raw provider API key "
+            "instead of pasted JSON, HTML, or formatted text."
+        )
+    if any(ord(char) < 33 or ord(char) > 126 for char in value):
+        raise RuntimeError(
+            f"{source} contains whitespace or control characters and cannot be "
+            "sent in an HTTP Authorization header. Replace it with the raw "
+            "provider API key."
+        )
+
+
+def _validate_explicit_headers(headers: Mapping[str, str], *, source: str) -> None:
+    """Reject explicit provider headers that HTTPX cannot encode safely."""
+    for name, value in headers.items():
+        if not name.isascii() or not value.isascii():
+            raise RuntimeError(
+                f"{source} produces a non-ASCII HTTP header ({name!r}). "
+                "Use an ASCII-only header value."
+            )
+        if "\r" in value or "\n" in value:
+            raise RuntimeError(
+                f"{source} produces an invalid multiline HTTP header ({name!r})."
+            )
 
 
 def _redact_proxy_url(name: str, raw: str | None) -> str:
@@ -651,16 +996,6 @@ def _ensure_dotenv() -> None:
     )
 
 
-def _normalize_ollama_base_url(base_url: str) -> str:
-    """Append ``/v1`` when missing so ChatOpenAI hits Ollama's OpenAI-compatible API."""
-    url = base_url.strip().rstrip("/")
-    if not url:
-        return url
-    if url.endswith("/v1"):
-        return url
-    return f"{url}/v1"
-
-
 def _sync_provider_env() -> None:
     """Map provider-specific env vars to OPENAI_* for ChatOpenAI.
 
@@ -684,9 +1019,6 @@ def _sync_provider_env() -> None:
     creds = get_llm_credentials(provider, get_env_config().llm.langchain_model_name)
     api_key = creds["api_key"]
     base_url = creds["base_url"]
-
-    if provider == "ollama" and base_url:
-        base_url = _normalize_ollama_base_url(base_url)
 
     # SDK-side env setup, not Vibe-Trading config reads
     if api_key:
@@ -751,6 +1083,7 @@ def provider_diagnostics() -> dict[str, Any]:
     key_env = caps.api_key_env
     creds = get_llm_credentials(provider, model)
     base_url = creds["base_url"]
+    credential_source = _credential_env_source(key_env)
     proxy_names = [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -798,6 +1131,18 @@ def provider_diagnostics() -> dict[str, Any]:
         "model": model,
         "base_url": _redact_base_url_for_log(base_url),
         "api_key": {key_env: _redact_env_flag(key_env)} if key_env else {},
+        "http_header_env": {
+            "authorization": {
+                "source": credential_source,
+                **_header_value_diagnostic(creds["api_key"]),
+            },
+            "ambient_openai": {
+                name: _header_value_diagnostic(
+                    os.getenv(name, "")  # noqa: env-gate — redacted header diagnostic
+                )
+                for name in _AMBIENT_OPENAI_HEADER_ENV_VARS
+            },
+        },
         "env": {
             "LANGCHAIN_PROVIDER": _redact_env_flag("LANGCHAIN_PROVIDER"),
             "LANGCHAIN_MODEL_NAME": _redact_env_flag("LANGCHAIN_MODEL_NAME"),
@@ -911,8 +1256,16 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
     # Optional reasoning activation for relays requiring opt-in (e.g. OpenRouter).
     # Moonshot/DeepSeek official APIs emit reasoning by default and ignore this field.
     effort = get_env_config().llm.langchain_reasoning_effort.strip().lower()
+    creds = get_llm_credentials(provider, name)
+    api_key = creds["api_key"]
+    _validate_authorization_credential(
+        api_key,
+        source=_credential_env_source(caps.api_key_env),
+    )
     kwargs: dict[str, Any] = {
         "model": name,
+        "api_key": api_key or None,
+        "base_url": creds["base_url"] or None,
         "temperature": temperature,
         "timeout": get_env_config().llm.timeout_seconds,
         "max_retries": get_env_config().llm.max_retries,
@@ -932,6 +1285,7 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
             else None
         ),
         "vibe_provider": provider,
+        "vibe_api_key": api_key,
     }
     if caps.default_headers:
         headers = dict(caps.default_headers)
@@ -939,5 +1293,10 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
             custom_ua = get_env_config().llm.moonshot_user_agent.strip()
             if custom_ua:
                 headers["User-Agent"] = custom_ua
+        _validate_explicit_headers(headers, source=f"{caps.name} provider configuration")
         kwargs["default_headers"] = headers
+    if get_env_config().llm.vibe_trading_disable_http_proxy:
+        sync_client, async_client = _build_proxy_free_http_clients()
+        kwargs["http_client"] = sync_client
+        kwargs["http_async_client"] = async_client
     return ChatOpenAIWithReasoning(**kwargs)

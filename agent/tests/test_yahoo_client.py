@@ -67,6 +67,8 @@ class TestMapSymbol:
     def test_passthrough_for_other_symbols(self):
         assert yahoo_client.map_symbol("BTC-USD") == "BTC-USD"
         assert yahoo_client.map_symbol("^GSPC") == "^GSPC"
+        assert yahoo_client.map_symbol("TD.TO") == "TD.TO"
+        assert yahoo_client.map_symbol("PNG.V") == "PNG.V"
 
 
 # ---------------------------------------------------------------------------

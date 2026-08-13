@@ -17,9 +17,9 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from backtest.engines import taifex_margins
+from backtest import taifex_margins
 from backtest.engines._market_hooks import _detect_market
-from backtest.engines.taifex_margins import FALLBACK_INITIAL_MARGIN, parse_margin_rows
+from backtest.taifex_margins import FALLBACK_INITIAL_MARGIN, parse_margin_rows
 
 _INITIAL_MARGIN = FALLBACK_INITIAL_MARGIN
 from backtest.engines.taiwan_equity import (

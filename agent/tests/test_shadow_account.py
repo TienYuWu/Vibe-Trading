@@ -5,15 +5,13 @@ Fixtures are synthesized in-test via tmp_path; no binary fixtures on disk.
 
 from __future__ import annotations
 
+import builtins
 import json
+import types
 from pathlib import Path
 
 import pandas as pd
 import pytest
-
-pytestmark = pytest.mark.filterwarnings(
-    "ignore:Number of distinct clusters.*:UserWarning",
-)
 
 from src.shadow_account import (
     AttributionBreakdown,
@@ -32,8 +30,11 @@ from src.shadow_account import (
     validate_generated,
     write_run_dir,
 )
-from src.shadow_account.models import AttributionBreakdown as _AttrCls
 from src.shadow_account.extractor import MIN_PROFITABLE_ROUNDTRIPS
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Number of distinct clusters.*:UserWarning",
+)
 
 
 # ---------------- Helpers ----------------
@@ -267,7 +268,6 @@ def test_generated_engine_runs_on_mock_data_map(profitable_journal: Path) -> Non
     profile = extract_shadow_profile(profitable_journal)
     source = render_signal_engine(profile)
 
-    module_path = Path("./_shadow_test_engine.py").resolve()
     # Use tmp via test's temp dir proxy — write + exec.
     import tempfile
 
@@ -418,6 +418,241 @@ def test_run_shadow_backtest_handles_runner_failure(
     assert result.equity_curves == {}
 
 
+# ---------------- M3b: per-currency multi-market runs ----------------
+
+from backtest.engines._market_hooks import code_currency  # noqa: E402
+from src.shadow_account.backtester import (  # noqa: E402
+    _group_selection_by_currency,
+    _LIQUID_BASKETS,
+)
+from src.shadow_account.storage import runs_dir  # noqa: E402
+
+
+def _recording_stub(
+    metrics_by_pool: dict[str, dict[str, float]],
+    calls: list[dict[str, object]],
+    *,
+    fail_pools: frozenset[str] = frozenset(),
+    with_equity: bool = False,
+):
+    """Build a run_backtest_fn stub keyed by the run_dir's pool name."""
+
+    def stub(run_dir_str: str) -> str:
+        run_path = Path(run_dir_str)
+        pool = run_path.name
+        cfg = json.loads((run_path / "config.json").read_text(encoding="utf-8"))
+        calls.append({"pool": pool, "codes": cfg.get("codes") or []})
+        if pool in fail_pools:
+            return json.dumps({
+                "status": "error",
+                "exit_code": 1,
+                "stderr": f"{pool} fetch failed",
+                "artifacts": {},
+            })
+        artifacts_dir = run_path / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = artifacts_dir / "metrics.json"
+        metrics_path.write_text(
+            json.dumps(metrics_by_pool[pool]), encoding="utf-8",
+        )
+        artifacts = {"metrics.json": str(metrics_path)}
+        if with_equity:
+            equity_path = artifacts_dir / "equity.csv"
+            equity_path.write_text(
+                "date,equity\n2026-01-02,1000000\n2026-06-30,1000000\n",
+                encoding="utf-8",
+            )
+            artifacts["equity.csv"] = str(equity_path)
+        return json.dumps({
+            "status": "ok", "exit_code": 0, "artifacts": artifacts,
+        })
+
+    return stub
+
+
+@pytest.mark.unit
+def test_group_selection_by_currency_default_markets(
+    profitable_journal: Path,
+) -> None:
+    profile = extract_shadow_profile(profitable_journal)
+    selection = select_multi_market_codes(profile, per_market_count=3)
+    groups = _group_selection_by_currency(selection)
+    assert set(groups.keys()) == {"CNY", "HKD", "USD"}
+    assert set(groups["CNY"].keys()) == {"china_a"}
+    assert set(groups["HKD"].keys()) == {"hk"}
+    assert set(groups["USD"].keys()) == {"us", "crypto"}
+
+
+@pytest.mark.unit
+def test_group_selection_by_currency_us_crypto_single_group() -> None:
+    groups = _group_selection_by_currency({
+        "us": _LIQUID_BASKETS["us"][:2],
+        "crypto": _LIQUID_BASKETS["crypto"][:2],
+    })
+    assert set(groups.keys()) == {"USD"}
+    assert set(groups["USD"].keys()) == {"us", "crypto"}
+
+
+@pytest.mark.unit
+def test_run_shadow_backtest_runs_once_per_currency(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+
+    calls: list[dict[str, object]] = []
+    metrics = {
+        "CNY": {"total_return_abs": 100.0, "sharpe": 1.0},
+        "HKD": {"total_return_abs": 200.0, "sharpe": 2.0},
+        "USD": {"total_return_abs": 300.0, "sharpe": 3.0},
+    }
+    result = run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        run_backtest_fn=_recording_stub(metrics, calls),
+    )
+    assert len(calls) == 3
+    assert {c["pool"] for c in calls} == {"CNY", "HKD", "USD"}
+    for call in calls:
+        currencies = {code_currency(c) for c in call["codes"]}  # type: ignore[union-attr]
+        assert len(currencies) == 1
+    assert (runs_dir(profile.shadow_id) / "shadow_result.json").exists()
+    assert set(result.per_market.keys()) == {"china_a", "hk", "us", "crypto"}
+
+
+@pytest.mark.unit
+def test_per_market_rows_come_from_own_currency_group(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+
+    calls: list[dict[str, object]] = []
+    metrics = {
+        "CNY": {"total_return_abs": 100.0, "sharpe": 1.0},
+        "HKD": {"total_return_abs": 200.0, "sharpe": 2.0},
+        "USD": {"total_return_abs": 300.0, "sharpe": 3.0},
+    }
+    result = run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        run_backtest_fn=_recording_stub(metrics, calls),
+    )
+    assert result.per_market["china_a"]["sharpe"] == 1.0
+    assert result.per_market["hk"]["sharpe"] == 2.0
+    assert result.per_market["us"]["sharpe"] == 3.0
+    assert result.per_market["crypto"]["sharpe"] == 3.0
+
+
+@pytest.mark.unit
+def test_headline_pnl_uses_source_market_currency(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+    assert profile.source_market == "china_a"
+
+    calls: list[dict[str, object]] = []
+    metrics = {
+        "CNY": {"total_return_abs": 100.0, "sharpe": 1.0},
+        "HKD": {"total_return_abs": 200.0, "sharpe": 2.0},
+        "USD": {"total_return_abs": 300.0, "sharpe": 3.0},
+    }
+    result = run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        run_backtest_fn=_recording_stub(metrics, calls),
+    )
+    assert result.combined["total_return_abs"] == 100.0
+    assert result.shadow_total_pnl == 100.0
+    assert "_currency_note" in result.combined
+
+
+@pytest.mark.unit
+def test_single_currency_group_keeps_single_run(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+
+    calls: list[dict[str, object]] = []
+    metrics = {"USD": {"total_return_abs": 300.0, "sharpe": 3.0}}
+    result = run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        markets=("us", "crypto"),
+        run_backtest_fn=_recording_stub(metrics, calls, with_equity=True),
+    )
+    assert len(calls) == 1
+    assert calls[0]["pool"] == "USD"
+    assert result.combined["total_return_abs"] == 300.0
+    assert "_currency_note" not in result.combined
+    assert set(result.equity_curves.keys()) == {"USD", "combined"}
+    assert result.equity_curves["combined"] == result.equity_curves["USD"]
+
+
+@pytest.mark.unit
+def test_currency_group_failure_is_isolated(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+
+    calls: list[dict[str, object]] = []
+    metrics = {
+        "HKD": {"total_return_abs": 200.0, "sharpe": 2.0},
+        "USD": {"total_return_abs": 300.0, "sharpe": 3.0},
+    }
+    result = run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        run_backtest_fn=_recording_stub(
+            metrics, calls, fail_pools=frozenset({"CNY"}),
+        ),
+    )
+    assert len(calls) == 3
+    assert result.per_market["china_a"] == {}
+    assert result.per_market["hk"]["sharpe"] == 2.0
+    assert result.per_market["us"]["sharpe"] == 3.0
+    assert "error" not in result.combined
+    assert result.combined["total_return_abs"] == 200.0
+    assert result.shadow_total_pnl == 200.0
+
+
+@pytest.mark.unit
+def test_all_currency_groups_failure(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+
+    calls: list[dict[str, object]] = []
+    result = run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        run_backtest_fn=_recording_stub(
+            {}, calls, fail_pools=frozenset({"CNY", "HKD", "USD"}),
+        ),
+    )
+    assert len(calls) == 3
+    assert result.combined.get("error")
+    assert result.shadow_total_pnl == 0.0
+    assert result.equity_curves == {}
+    assert all(row == {} for row in result.per_market.values())
+
+
 # ---------------- M4: Reporter ----------------
 
 def _stub_backtest_result(profile: ShadowProfile) -> ShadowBacktestResult:
@@ -497,6 +732,75 @@ def test_render_shadow_report_handles_empty_equity(
     assert Path(out["html_path"]).exists()
     # Section 6 should degrade gracefully when no counterfactuals exist.
     assert "No material counterfactual" in Path(out["html_path"]).read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_weasyprint_import_is_probed_once_per_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A weasyprint import that failed must never be retried in the process.
+
+    The retry is what crashes: the failed import drops weasyprint's cffi
+    ``Lib``, whose deallocator ``dlclose()``s libgobject while GLib's quark
+    table still holds static-string keys into that image, so the next import
+    re-runs libgobject's constructor and faults (GNOME bug 705535). Three
+    report renders in one process were enough to hit it.
+    """
+    from src.shadow_account import reporter
+
+    monkeypatch.setattr(reporter, "_WEASYPRINT_HTML", None)
+    attempts: list[str] = []
+    real_import = builtins.__import__
+
+    def counting_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "weasyprint" or name.startswith("weasyprint."):
+            attempts.append(name)
+            raise ImportError("cannot load library 'libgobject-2.0-0'")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", counting_import)
+
+    for _ in range(3):
+        assert reporter._try_render_pdf("<html></html>", tmp_path, "sid") == (None, "html-only")
+
+    assert attempts == ["weasyprint"]
+
+
+@pytest.mark.unit
+def test_weasyprint_probe_is_cached_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful probe is reused, and still renders on every call."""
+    from src.shadow_account import reporter
+
+    monkeypatch.setattr(reporter, "_WEASYPRINT_HTML", None)
+    attempts: list[str] = []
+    real_import = builtins.__import__
+
+    class _FakeHTML:
+        def __init__(self, string: str, base_url: str) -> None:
+            self.string = string
+
+        def write_pdf(self, target: str) -> None:
+            Path(target).write_bytes(b"%PDF-1.4\n")
+
+    fake = types.ModuleType("weasyprint")
+    fake.HTML = _FakeHTML  # type: ignore[attr-defined]
+
+    def counting_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "weasyprint":
+            attempts.append(name)
+            return fake
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", counting_import)
+
+    for shadow_id in ("first", "second"):
+        pdf_path, engine = reporter._try_render_pdf("<html></html>", tmp_path, shadow_id)
+        assert engine == "weasyprint"
+        assert pdf_path is not None and pdf_path.exists()
+
+    assert attempts == ["weasyprint"]
 
 
 # ---------------- M5/M6: Tool wrappers + scanner ----------------
