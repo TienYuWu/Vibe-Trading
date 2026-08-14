@@ -1,0 +1,63 @@
+# Fast-forward this fork's `main` to HKUDS/Vibe-Trading.
+#
+# Scope is deliberately just `main`. Feature branches are NOT touched: merging
+# upstream into one reliably conflicts (the last sync had seven, in tables both
+# sides extend), and a bot resolving those would silently pick a side. Merge
+# your own branches by hand, from a `main` this job has already moved forward.
+#
+# `--ff-only` is the safety property. If `main` has ever diverged from upstream
+# — a commit landed here directly, or a merge was made — the job FAILS instead
+# of writing a merge commit nobody reviewed. A red run is the signal to look.
+#
+# Two things to know about scheduled workflows on a fork:
+#   1. GitHub disables Actions on new forks. Enable them once under
+#      Settings > Actions > General, or this never runs.
+#   2. GitHub disables `schedule` triggers after 60 days with no repo activity
+#      and emails the owner. `workflow_dispatch` below stays available, so the
+#      recovery is the "Run workflow" button.
+
+name: sync upstream
+
+on:
+  schedule:
+    # 20:00 UTC = 04:00 Asia/Taipei. Cron here is always UTC and does not
+    # follow daylight saving anywhere.
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          # Full history: a shallow clone cannot fast-forward.
+          fetch-depth: 0
+
+      - name: Fast-forward main to upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/HKUDS/Vibe-Trading.git
+          git fetch upstream main
+          behind=$(git rev-list --count HEAD..upstream/main)
+          ahead=$(git rev-list --count upstream/main..HEAD)
+          echo "main is $behind behind and $ahead ahead of upstream/main"
+          if [ "$ahead" -ne 0 ]; then
+            echo "::error::main has $ahead commit(s) upstream does not. Fast-forward is not possible; reconcile by hand."
+            exit 1
+          fi
+          if [ "$behind" -eq 0 ]; then
+            echo "Already up to date; nothing to push."
+            exit 0
+          fi
+          git merge --ff-only upstream/main
+          git push origin main
+          echo "Fast-forwarded main by $behind commit(s)." >> "$GITHUB_STEP_SUMMARY"
