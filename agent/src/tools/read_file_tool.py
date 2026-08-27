@@ -23,7 +23,13 @@ class ReadFileTool(BaseTool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path relative to run_dir or skills/"},
+            "path": {
+                "type": "string",
+                "description": (
+                    "File path relative to run_dir or skills/. "
+                    "The skills/ prefix always resolves to the bundled skills."
+                ),
+            },
             "limit": {"type": "integer", "description": "Max number of lines to return (default: all)"},
         },
         "required": ["path"],
@@ -65,23 +71,32 @@ class ReadFileTool(BaseTool):
             if extra_root not in allowed_roots:
                 allowed_roots.append(extra_root)
 
-        # Strip redundant "skills/" prefix that LLMs sometimes add
-        paths_to_try = [file_path]
-        if file_path.startswith("skills/"):
-            paths_to_try.append(file_path[len("skills/") :])
-
         resolved = None
-        for root in allowed_roots:
-            for p in paths_to_try:
+        namespaced = False
+
+        # `skills/` is a namespace bound to the bundled read-only skills root.
+        # Binding the prefix stops a same-named file in run_dir — which the agent
+        # itself can write — from shadowing a bundled skill and being loaded as
+        # trusted guidance.
+        if file_path.startswith("skills/"):
+            namespaced = True
+            try:
+                candidate = _safe_path(file_path[len("skills/") :], skills_dir)
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate.exists():
+                resolved = candidate
+
+        # Unprefixed paths search every allowed root, run_dir first.
+        if resolved is None and not namespaced:
+            for root in allowed_roots:
                 try:
-                    candidate = _safe_path(p, root)
+                    candidate = _safe_path(file_path, root)
                     if candidate.exists():
                         resolved = candidate
                         break
                 except ValueError:
                     continue
-            if resolved:
-                break
 
         if resolved is None:
             return json.dumps(

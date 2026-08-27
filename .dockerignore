@@ -51,11 +51,9 @@ CONTRIBUTING.md
 /*.md
 !README.md
 # The translated READMEs are needed ONLY by the `test` stage, which runs
-# test_readme_counts.py against all five. They stay out of the runtime image:
-# its COPY names README.md explicitly, so un-ignoring these adds them to the
-# build context without shipping them.
-!README_ar.md
-!README_ja.md
-!README_ko.md
-!README_zh.md
+# test_readme_counts.py against every locale. They stay out of the runtime
+# image: its COPY names README.md explicitly, so un-ignoring these adds them to
+# the build context without shipping them. Globbed so a new locale is covered
+# the day upstream adds one — README_es.md arrived exactly that way.
+!README_*.md
 !LICENSE

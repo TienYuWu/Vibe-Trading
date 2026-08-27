@@ -191,6 +191,21 @@ def _cancel_resting_orders(
                 str(exc),
             )
             continue
+        envelope_error = _error_envelope_message(response)
+        if envelope_error is not None:
+            report["errors"].append(
+                {"phase": "cancel", "order_id": order_id, "error": envelope_error}
+            )
+            _audit(
+                broker,
+                _sweep_tool(broker, "cancel_order", _CANCEL_TOOL),
+                f"cancel order {order_id}",
+                request,
+                response,
+                "error",
+                envelope_error,
+            )
+            continue
         report["cancelled_order_ids"].append(order_id)
         _audit(
             broker,
@@ -258,6 +273,21 @@ def _flatten_open_positions(
                 str(exc),
             )
             continue
+        envelope_error = _error_envelope_message(response)
+        if envelope_error is not None:
+            report["errors"].append(
+                {"phase": "flatten", "symbol": symbol, "error": envelope_error}
+            )
+            _audit(
+                broker,
+                _sweep_tool(broker, "submit_order", _FLATTEN_TOOL),
+                intent,
+                request,
+                response,
+                "error",
+                envelope_error,
+            )
+            continue
         report["flatten_orders_submitted"].append(
             {"symbol": symbol, "qty": close_qty, "side": side, "response": response}
         )
@@ -270,6 +300,20 @@ def _flatten_open_positions(
             "accepted",
             None,
         )
+
+
+def _error_envelope_message(response: Any) -> str | None:
+    """Return the error string when a broker call failed via envelope.
+
+    The MCP adapter converts a failed remote call into
+    ``{"status": "error", "error": ...}`` instead of raising, so a returned
+    dict is not proof the broker accepted the request. Treating that
+    envelope as success would audit a resting order as cancelled while it
+    stays live, which is the failure the sweep exists to prevent.
+    """
+    if isinstance(response, dict) and response.get("status") == "error":
+        return str(response.get("error") or "broker returned an error envelope")
+    return None
 
 
 def _sweep_tool(broker: str, operation: str, fallback: str) -> str:

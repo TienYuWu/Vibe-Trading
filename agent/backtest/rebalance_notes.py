@@ -32,7 +32,7 @@ def compute_rebalance_notes(
 
     Args:
         target_pos: Target weights (dates x codes), e.g. the frame behind
-            ``artifacts/positions.csv``. NaN cells are treated as zero.
+            ``artifacts/target_positions.csv``. NaN cells are treated as zero.
         top_n: How many largest per-name moves to keep per rebalance.
         epsilon: Turnover at or below this counts as "no rebalance".
 

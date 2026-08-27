@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from src.agent.loop import TOOL_RESULT_LIMIT
+from src.config.limits import TOOL_RESULT_LIMIT
 from src.agent.skills import SkillsLoader
 from src.tools.load_skill_tool import LoadSkillTool
 

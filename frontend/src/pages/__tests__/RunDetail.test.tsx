@@ -6,15 +6,26 @@ import type { RunData } from "@/lib/api";
 const apiMock = vi.hoisted(() => ({
   getRun: vi.fn(),
   getRunCode: vi.fn(),
+  getRunFactor: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => ({ api: apiMock }));
+vi.mock("@/components/charts/FactorResearchPanel", () => ({
+  FactorResearchPanel: () => <div data-testid="factor-panel" />,
+}));
 vi.mock("@/components/charts/CandlestickChart", () => ({
   CandlestickChart: () => <div data-testid="candlestick-chart" />,
 }));
 vi.mock("@/components/charts/EquityChart", () => ({
   EquityChart: () => <div data-testid="equity-chart" />,
 }));
+vi.mock("@/components/charts/StrategyResearchDashboard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/charts/StrategyResearchDashboard")>();
+  return {
+    ...actual,
+    StrategyResearchDashboard: ({ run }: { run: RunData }) => <div data-testid="strategy-dashboard">{run.run_id}</div>,
+  };
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -37,6 +48,66 @@ describe("RunDetail page", () => {
   beforeEach(() => {
     apiMock.getRun.mockReset();
     apiMock.getRunCode.mockReset();
+    apiMock.getRunFactor.mockReset();
+  });
+
+  it("presents a readable strategy title instead of promoting the run id", async () => {
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "20260811_110751_32_d951c8",
+      prompt: "回测 000001.SZ 在 2024 年的 20/50 日均线交叉策略。",
+      chart_symbols: ["000001.SZ"],
+      run_card: {
+        backtest: { codes: ["000001.SZ"], start_date: "2024-01-01", end_date: "2024-12-31", engine: "daily" },
+        data_sources: ["tencent"],
+      },
+    });
+    apiMock.getRunCode.mockResolvedValueOnce({});
+
+    renderRunDetail("/runs/20260811_110751_32_d951c8?view=dashboard");
+
+    // The strategy name is report chrome derived from the prompt, so it follows
+    // the UI language, not the prompt's. A Chinese prompt under an English UI
+    // must not leak a Chinese title into an otherwise English report.
+    expect(
+      await screen.findByRole("heading", { name: "000001.SZ · 20/50-day moving-average crossover" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("RUN 20260811_110751_32_d951c8")).toHaveClass("text-[10px]");
+  });
+
+  it("renders the derived strategy name in the active UI language", async () => {
+    const i18n = (await import("@/i18n")).default;
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "zh-run",
+      prompt: "回测 000001.SZ 在 2024 年的 20/50 日均线交叉策略。",
+      chart_symbols: ["000001.SZ"],
+    });
+    apiMock.getRunCode.mockResolvedValueOnce({});
+    const previous = i18n.language;
+    await act(async () => {
+      await i18n.changeLanguage("zh-CN");
+    });
+    try {
+      renderRunDetail("/runs/zh-run?view=dashboard");
+      expect(
+        await screen.findByRole("heading", { name: "000001.SZ · 20/50 日均线交叉策略" })
+      ).toBeInTheDocument();
+    } finally {
+      await act(async () => {
+        await i18n.changeLanguage(previous);
+      });
+    }
+  });
+
+  it("opens the research dashboard when requested by the terminal report URL", async () => {
+    apiMock.getRun.mockResolvedValue({ status: "success", run_id: "terminal-run", prompt: "MA strategy" });
+    apiMock.getRunCode.mockResolvedValue({});
+
+    renderRunDetail("/runs/terminal-run?view=dashboard");
+
+    expect(await screen.findByTestId("strategy-dashboard")).toHaveTextContent("terminal-run");
+    expect(screen.getByRole("tab", { name: /dashboard/i })).toHaveAttribute("aria-selected", "true");
   });
 
   it("does not let an older route load replace the current run or code", async () => {
@@ -127,7 +198,8 @@ describe("RunDetail page", () => {
 
     await screen.findByText("Accessible run");
     expect(screen.getByText("Completed")).toHaveClass("sr-only");
-    expect(screen.getByRole("heading", { level: 1, name: "accessible" })).toHaveClass("text-2xl", "font-semibold");
+    expect(screen.getByRole("heading", { level: 1, name: "Portfolio · Accessible run" })).toHaveClass("text-xl", "font-semibold");
+    expect(screen.getByText("RUN accessible")).toHaveClass("font-mono", "text-[10px]");
     expect(screen.getByRole("tablist")).toBeInTheDocument();
 
     const chartTab = screen.getByRole("tab", { name: "Chart" });
@@ -167,6 +239,57 @@ describe("RunDetail page", () => {
     expect(keyCell.closest("table")?.parentElement).toHaveClass("overflow-x-auto");
     expect(screen.getByRole("columnheader", { name: "Path" })).toHaveClass("ps-4");
     expect(screen.getByText("artifacts/result.json")).toHaveClass("ps-4");
+  });
+
+  it("renders the Factor Research tab from has_factor_artifacts and lazy-loads the report", async () => {
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "factor-run",
+      prompt: "Factor run",
+      has_factor_artifacts: true,
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+    apiMock.getRunFactor.mockResolvedValue({
+      exists: true,
+      factors: [{
+        name: "momentum_20d",
+        path: "artifacts/factor_momentum_20d",
+        ic_series: [{ date: "2024-01-02", ic: 0.03 }],
+        ic_stats: { ic_mean: 0.03, ic_std: 0.02, ir: 1.5, ic_positive_ratio: 0.6, ic_count: 1 },
+        group_equity: [{ date: "2024-01-02", Group_1: 1, Group_2: 1.01 }],
+        n_groups: 2,
+        long_short_spread: 0.01,
+        group_final_equity: { Group_1: 1, Group_2: 1.01 },
+      }],
+      ic_correlation: null,
+    });
+
+    renderRunDetail("/runs/factor-run");
+
+    await screen.findByText("Factor run");
+    // The factor report is fetched lazily on tab open, never with the main run payload.
+    expect(apiMock.getRunFactor).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Factor Research" }));
+
+    expect(await screen.findByTestId("factor-panel")).toBeInTheDocument();
+    expect(apiMock.getRunFactor).toHaveBeenCalledWith("factor-run");
+  });
+
+  it("hides the Factor Research tab when the run has no factor artifacts", async () => {
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "no-factor-run",
+      prompt: "No factor run",
+      trade_log: [],
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+
+    renderRunDetail("/runs/no-factor-run");
+
+    await screen.findByText("No factor run");
+    expect(screen.queryByRole("tab", { name: "Factor Research" })).not.toBeInTheDocument();
+    expect(apiMock.getRunFactor).not.toHaveBeenCalled();
   });
 });
 

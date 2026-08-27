@@ -206,3 +206,75 @@ def test_mandate_flatten_flag_honored(
     )
     assert [s["symbol"] for s in report["flatten_orders_submitted"]] == ["NVDA"]
     assert report["flatten_skipped_reason"] is None
+
+
+def _error_envelope(key: str) -> dict[str, Any]:
+    """The shape MCPServerAdapter.call_tool returns instead of raising."""
+    return {
+        "status": "error",
+        "server": "robinhood",
+        "remote_tool": "cancel_equity_order",
+        "tool": "cancel_equity_order",
+        "error": f"connection reset while cancelling {key}",
+        "error_type": "ConnectionError",
+    }
+
+
+def test_error_envelope_cancel_is_not_a_success(live_runtime: Path) -> None:
+    # A broker failure that comes back as an envelope must not be recorded
+    # as a cancelled order: the resting order is still live.
+    broker = _Broker(
+        open_orders=[{"order_id": "o1"}, {"order_id": "o2"}], positions=[]
+    )
+    real_submit = broker.submit
+
+    def submit(request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("order_id") == "o1":
+            return _error_envelope("o1")
+        return real_submit(request)
+
+    report = flatten.flatten_and_cancel(
+        "robinhood", submit, broker.read_positions, broker.read_open_orders
+    )
+    assert report["cancelled_order_ids"] == ["o2"]
+    assert report["errors"] == [
+        {
+            "phase": "cancel",
+            "order_id": "o1",
+            "error": "connection reset while cancelling o1",
+        }
+    ]
+    rejected = [r for r in _read_ledger() if r["kind"] == "order_rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["outcome"] == "error"
+    assert rejected[0]["error"] == "connection reset while cancelling o1"
+    assert rejected[0]["broker_response"]["status"] == "error"
+
+
+def test_error_envelope_flatten_is_not_a_success(live_runtime: Path) -> None:
+    broker = _Broker(
+        open_orders=[],
+        positions=[{"symbol": "NVDA", "qty": 3}, {"symbol": "AAPL", "qty": 1}],
+    )
+    real_submit = broker.submit
+
+    def submit(request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("symbol") == "NVDA":
+            return _error_envelope("NVDA")
+        return real_submit(request)
+
+    report = flatten.flatten_and_cancel(
+        "robinhood",
+        submit,
+        broker.read_positions,
+        broker.read_open_orders,
+        allow_flatten=True,
+    )
+    assert [s["symbol"] for s in report["flatten_orders_submitted"]] == ["AAPL"]
+    assert report["errors"] == [
+        {
+            "phase": "flatten",
+            "symbol": "NVDA",
+            "error": "connection reset while cancelling NVDA",
+        }
+    ]

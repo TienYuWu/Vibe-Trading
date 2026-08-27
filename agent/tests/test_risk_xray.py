@@ -377,12 +377,17 @@ def test_run_backtest_emits_risk_xray_artifacts(tmp_path):
     assert out_json.exists() and out_md.exists()
     payload = json.loads(out_json.read_text(encoding="utf-8"))
     _assert_strict_json(payload)
-    # constant 1.0 signals normalize to an even two-name basket
-    assert payload["concentration"]["hhi"] == pytest.approx(0.5)
+    # The opening target is even, but actual weights drift with each symbol's
+    # realized price path; the x-ray must reflect execution truth, not preserve
+    # the optimizer's idealized 50/50 weights.
+    assert payload["concentration"]["hhi"] == pytest.approx(0.5010936725)
     assert set(payload["inputs"]["symbols"]) == {"AAA", "BBB"}
     assert "# Portfolio Risk X-Ray" in out_md.read_text(encoding="utf-8")
 
-    assert metrics["risk_xray_hhi"] == pytest.approx(0.5)
-    assert metrics["risk_xray_effective_n"] == pytest.approx(2.0)
+    assert metrics["risk_xray_hhi"] == pytest.approx(payload["concentration"]["hhi"])
+    assert metrics["risk_xray_effective_n"] == pytest.approx(payload["concentration"]["effective_n"])
     assert metrics["risk_xray_annualized_vol"] is not None
-    assert metrics["risk_xray_avg_invested"] == pytest.approx(39 / 40, abs=1e-6)
+    # Execution truth has two flat observations: the initial next-bar-open
+    # signal lag and the terminal liquidation.  The old target-frame report
+    # counted the latter as invested even though the position was closed.
+    assert metrics["risk_xray_avg_invested"] == pytest.approx(38 / 40, abs=1e-6)

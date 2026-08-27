@@ -46,6 +46,7 @@ from src.live.mandate.model import Mandate
 from src.live.mandate.store import load_mandate
 from src.live.runtime.flatten import flatten_and_cancel
 from src.live.runtime.jobstore import JobStore
+from src.live.runtime.sweep_latch import mark_sweep_fired, sweep_already_fired
 from src.live.runtime.liveness import write_heartbeat
 from src.live.runtime.scheduler import Job, Scheduler
 from src.live.runtime.triggers import Trigger, due_now
@@ -571,12 +572,17 @@ class LiveRunner:
 
         Invoked the moment the runner observes a tripped HALT. Idempotent across
         ticks via the ``_flatten_fired`` latch so the no-retry rule (SPEC §8.5)
-        holds even if the halted runner keeps waking. A sweep failure is audited
-        but not retried — flatten/cancel side effects are not idempotent.
+        holds even if the halted runner keeps waking. The latch is also persisted
+        on disk (``sweep_latch``) so a restart with flatten orders still working
+        does not replay the sweep. A sweep failure is audited but not retried —
+        flatten/cancel side effects are not idempotent.
         """
         if self._flatten_fired or self._submit_fn is None:
             return
         self._flatten_fired = True
+        if sweep_already_fired(self.broker):
+            return
+        mark_sweep_fired(self.broker)
         try:
             self._flatten_fn(
                 self.broker,
