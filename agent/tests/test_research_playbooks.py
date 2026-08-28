@@ -36,6 +36,7 @@ EXPECTED_SLUGS = {
     "institutional-holdings-diff",
     "portfolio-checkup",
     "premarket-brief",
+    "taiwan-close-scan",
 }
 
 # 2026-08-04T12:00:00Z, fixed so first-fire assertions never depend on the clock.
