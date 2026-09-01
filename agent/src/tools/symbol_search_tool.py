@@ -52,6 +52,14 @@ _EASTMONEY_SUGGEST_URL = "https://searchapi.eastmoney.com/api/suggest/get"
 # are deliberately left to the normal fan-out.
 _CANADIAN_SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-]+\.(?:TO|V)\b", re.IGNORECASE)
 
+# A bare Taiwan listing code: four digits, or an ETF code (``0050``, ``00632R``).
+# Written WITHOUT a leading zero for ordinary shares, which is what separates it
+# from the Hong Kong convention for the same digits -- HK prints ``02330``,
+# Taiwan prints ``2330``. Confirmed against FinMind before it is treated as
+# Taiwanese; the regex alone only decides whether to ask.
+_BARE_TW_CODE_RE = re.compile(r"^([1-9][0-9]{3}|00[0-9]{2,4}[A-Z]?)$", re.IGNORECASE)
+_TW_SUFFIXES = ("TW", "TWO")
+
 # Eastmoney market-number -> our symbol suffix. Anything else is left unmapped
 # (those candidates are skipped rather than emitted with a wrong suffix).
 _EASTMONEY_SUFFIX_BY_MARKET: Dict[str, str] = {
@@ -70,6 +78,8 @@ _MARKET_BY_SUFFIX: Dict[str, str] = {
     "BJ": "cn",
     "HK": "hk",
     "US": "us",
+    "TW": "tw",
+    "TWO": "tw",
 }
 
 # Hard caps so a broad query cannot bloat the envelope.
@@ -160,6 +170,9 @@ class SymbolSearchTool(BaseTool):
         yh_hits, sources["yahoo"] = _search_yahoo(query)
         candidates.extend(yh_hits)
 
+        fm_hits, sources["finmind"] = _search_finmind(query)
+        candidates.extend(fm_hits)
+
         # Canada fail-fast: a Canadian ticker must resolve to the Canadian venue
         # only. Yahoo also returns the US OTC alias of the same company (e.g.
         # ``BYN.V`` -> ``BYAGF.US``), which would make the grounding ledger see
@@ -170,6 +183,18 @@ class SymbolSearchTool(BaseTool):
                 c
                 for c in candidates
                 if _is_canadian_symbol(str(c.get("symbol") or ""))
+            ]
+
+        # Taiwan fail-fast, and a stronger case than the Canadian one above:
+        # there the extra venue is the SAME company's US OTC alias, while here
+        # ``2330`` reaches TSMC in Taipei and an unrelated Hong Kong issuer.
+        # Letting both through makes the grounding ledger see one query resolve
+        # to two entities and reject every downstream call. Only a code FinMind
+        # confirmed as listed narrows the set, so an unconfirmed query keeps
+        # whatever the other sources found.
+        if fm_hits and _is_bare_tw_code(query):
+            candidates = [
+                c for c in candidates if _is_tw_symbol(str(c.get("symbol") or ""))
             ]
 
         merged = _merge_candidates(candidates)
@@ -241,6 +266,59 @@ def _is_ticker_name_query(query: str) -> bool:
     """
     tokens = (query or "").strip().split()
     return len(tokens) >= 2 and bool(re.fullmatch(r"[A-Z0-9&]{1,6}", tokens[0]))
+
+
+def _is_bare_tw_code(text: str) -> bool:
+    """Whether *text* is a bare Taiwan listing code, before any confirmation."""
+    return bool(_BARE_TW_CODE_RE.match((text or "").strip()))
+
+
+def _is_tw_symbol(text: str) -> bool:
+    """Whether *text* already carries a Taiwan venue suffix."""
+    head = (text or "").strip().upper().split()[0] if (text or "").strip() else ""
+    return head.rpartition(".")[2] in _TW_SUFFIXES
+
+
+def _search_finmind(query: str) -> tuple[List[Dict[str, Any]], str]:
+    """Resolve a bare Taiwan listing code against FinMind's listing table.
+
+    Neither Eastmoney nor Yahoo answers a bare Taiwan code: Eastmoney has no
+    Taiwan venue, and Yahoo needs the ``.TW`` suffix the caller is trying to
+    discover. Without this source, ``2330`` returned only Hong Kong's
+    ``02330.HK`` -- a different company on a different exchange -- and the
+    grounding ledger then priced a TSMC backtest in HKD.
+
+    Args:
+        query: Free-text query. Only a bare code shape is served.
+
+    Returns:
+        ``(candidates, status)``. ``status`` is ``"ok"``, a ``_SKIPPED`` reason
+        when the query shape is not a bare Taiwan code, or an error string.
+    """
+    code = (query or "").strip().upper()
+    if not _is_bare_tw_code(code):
+        return [], _SKIPPED + "query is not a bare Taiwan listing code"
+
+    try:
+        from backtest.loaders.finmind_loader import fetch_listing
+        rows = fetch_listing(code)
+    except Exception as exc:  # noqa: BLE001 -- one dead source must not fail the fan-out
+        logger.debug("finmind symbol search failed for %s: %s", code, exc)
+        return [], f"error: {type(exc).__name__}"
+
+    candidates: List[Dict[str, Any]] = []
+    for row in rows:
+        symbol = _format_symbol(str(row.get("code") or ""), str(row.get("suffix") or ""))
+        if not symbol:
+            continue
+        candidates.append({
+            "symbol": symbol,
+            "name": str(row.get("name") or ""),
+            "market": "tw",
+            "type": str(row.get("type") or ""),
+            "source": "finmind",
+        })
+    return candidates[:_PER_SOURCE_CAP], "ok"
 
 
 def _search_eastmoney(query: str) -> tuple[List[Dict[str, Any]], str]:
@@ -446,6 +524,12 @@ def _from_yahoo_symbol(raw_symbol: str, quote: Dict[str, Any]) -> tuple[str, str
         return f"{base.zfill(5)}.HK", "hk"
     if upper.endswith((".TO", ".V")):
         return upper, "ca"
+    # Taiwan: Yahoo already uses the project spelling, but would otherwise fall
+    # through to the generic branch and be labelled "global". The label has to
+    # match what the FinMind source emits, or the same listing merges under two
+    # market names depending on which source answered first.
+    if upper.endswith((".TW", ".TWO")):
+        return upper, "tw"
     # Yahoo quotes Shanghai as ``.SS`` where this project (and Eastmoney) use
     # ``.SH``. Emitting both spellings published one listing as two rival
     # candidates, which the identity gate could not choose between, so every

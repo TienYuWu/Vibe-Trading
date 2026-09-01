@@ -254,3 +254,79 @@ def _normalize_derivative(rows: list[dict]) -> pd.DataFrame:
     settle = frame["settle"].where(frame["settle"] > 0)
     frame["pre_settle"] = settle.shift(1)
     return frame
+
+
+# ── Listing lookup (symbol search) ──
+#
+# Kept beside the loader because it hits the same host with the same optional
+# token, but deliberately module-level rather than a DataLoader method: symbol
+# search resolves an identity, it does not fetch bars, and importing the loader
+# class for it would drag the whole fetch path into the tool.
+
+# TWSE prints ordinary shares and ETFs; TPEx is the over-the-counter venue.
+# Every other FinMind ``type`` (emerging board, warrants) is left unmapped so a
+# candidate is skipped rather than emitted under a venue it does not trade on.
+_LISTING_SUFFIX_BY_TYPE = {"twse": "TW", "tpex": "TWO"}
+
+_listing_cache: dict[str, list[dict]] | None = None
+
+
+def _load_listing_table() -> dict[str, list[dict]]:
+    """Fetch and index FinMind's Taiwan listing table, once per process.
+
+    Returns:
+        ``stock_id`` -> list of listing rows. Empty when the fetch fails, which
+        the caller reports as "no candidate" rather than an error.
+    """
+    global _listing_cache
+    if _listing_cache is not None:
+        return _listing_cache
+
+    from src.config.accessor import get_env_config
+
+    token = get_env_config().data.finmind_token.strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    resp = requests.get(
+        FINMIND_URL,
+        params={"dataset": "TaiwanStockInfo"},
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("status") != 200:
+        raise RuntimeError(f"FinMind TaiwanStockInfo error: {str(body.get('msg', body))[:160]}")
+
+    table: dict[str, list[dict]] = {}
+    for row in body.get("data", []) or []:
+        code = str(row.get("stock_id") or "").strip().upper()
+        suffix = _LISTING_SUFFIX_BY_TYPE.get(str(row.get("type") or "").strip().lower())
+        if not code or not suffix:
+            continue
+        table.setdefault(code, []).append({
+            "code": code,
+            "suffix": suffix,
+            "name": str(row.get("stock_name") or "").strip(),
+            "type": "etf" if code.startswith("00") else "equity",
+        })
+    _listing_cache = table
+    return table
+
+
+def fetch_listing(code: str) -> list[dict]:
+    """Return listing rows for an exact Taiwan listing code.
+
+    Args:
+        code: Bare listing code, e.g. ``2330`` or ``00632R``.
+
+    Returns:
+        Rows with ``code``, ``suffix`` (``TW``/``TWO``), ``name`` and ``type``.
+        Empty when the code is not listed in Taiwan.
+    """
+    return list(_load_listing_table().get((code or "").strip().upper(), []))
+
+
+def reset_listing_cache() -> None:
+    """Drop the cached listing table. For tests."""
+    global _listing_cache
+    _listing_cache = None

@@ -615,3 +615,90 @@ def test_implied_margin_rate_is_plausible(product: str) -> None:
     notional = REFERENCE_INDEX_LEVEL * _MULTIPLIER[product]
     rate = _INITIAL_MARGIN[product] / notional
     assert 0.03 <= rate <= 0.20, f"{product} implies a {rate:.1%} margin rate"
+
+
+# ---------------------------------------------------------------------------
+# Bare Taiwan code -> symbol resolution
+# ---------------------------------------------------------------------------
+
+
+class TestTaiwanSymbolSearch:
+    """A bare ``2330`` must reach TSMC in Taipei, not Hong Kong's ``02330.HK``.
+
+    Before this source existed the query returned only Hong Kong and mainland
+    candidates, so an agent citing price evidence for a Taiwan backtest read a
+    different company's HKD prices and the grounding gate refused the answer.
+    """
+
+    @pytest.mark.parametrize(
+        "code", ["2330", "0050", "6488", "00632R", "2454", "1101"]
+    )
+    def test_bare_taiwan_codes_are_recognised(self, code: str) -> None:
+        from src.tools.symbol_search_tool import _is_bare_tw_code
+
+        assert _is_bare_tw_code(code)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "AAPL",          # bare US ticker
+            "02330",         # Hong Kong prints a leading zero
+            "600519",        # six-digit A-share
+            "2330.TW",       # already suffixed; the search path, not this one
+            "",
+            "TSMC",
+        ],
+    )
+    def test_non_taiwan_shapes_are_left_alone(self, text: str) -> None:
+        """The regex only decides whether to ASK FinMind; over-matching would
+        send every numeric query to a Taiwan-only source."""
+        from src.tools.symbol_search_tool import _is_bare_tw_code
+
+        assert not _is_bare_tw_code(text)
+
+    @pytest.mark.parametrize(
+        "symbol, expected",
+        [("2330.TW", True), ("6488.TWO", True), ("2330", False),
+         ("02330.HK", False), ("AAPL.US", False)],
+    )
+    def test_taiwan_venue_detection(self, symbol: str, expected: bool) -> None:
+        from src.tools.symbol_search_tool import _is_tw_symbol
+
+        assert _is_tw_symbol(symbol) is expected
+
+    def test_yahoo_labels_taiwan_as_tw_not_global(self) -> None:
+        """Both sources must agree on the label, or one listing merges under two
+        market names depending on which source answered first."""
+        from src.tools.symbol_search_tool import _from_yahoo_symbol
+
+        assert _from_yahoo_symbol("2330.TW", {"quoteType": "EQUITY"}) == ("2330.TW", "tw")
+        assert _from_yahoo_symbol("6488.TWO", {"quoteType": "EQUITY"}) == ("6488.TWO", "tw")
+
+    def test_listing_rows_map_venue_and_type(self, monkeypatch) -> None:
+        """TWSE -> .TW, TPEx -> .TWO; an unmapped venue is skipped, not guessed."""
+        from backtest.loaders import finmind_loader
+
+        finmind_loader.reset_listing_cache()
+        monkeypatch.setattr(
+            finmind_loader,
+            "_load_listing_table",
+            lambda: {
+                "2330": [{"code": "2330", "suffix": "TW", "name": "台積電", "type": "equity"}],
+                "6488": [{"code": "6488", "suffix": "TWO", "name": "廣明", "type": "equity"}],
+                "0050": [{"code": "0050", "suffix": "TW", "name": "元大台灣50", "type": "etf"}],
+            },
+        )
+        assert finmind_loader.fetch_listing("2330")[0]["suffix"] == "TW"
+        assert finmind_loader.fetch_listing("6488")[0]["suffix"] == "TWO"
+        assert finmind_loader.fetch_listing("0050")[0]["type"] == "etf"
+        assert finmind_loader.fetch_listing("9999") == []
+
+    def test_search_skips_a_non_taiwan_query_without_erroring(self) -> None:
+        """A skip and a failure are not the same to the grounding ledger: a
+        source recorded as failed turns "not listed here" into a blocking
+        ambiguity."""
+        from src.tools.symbol_search_tool import _SKIPPED, _search_finmind
+
+        candidates, status = _search_finmind("AAPL")
+        assert candidates == []
+        assert status.startswith(_SKIPPED)
