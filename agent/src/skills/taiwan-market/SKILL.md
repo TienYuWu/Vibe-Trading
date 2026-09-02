@@ -80,9 +80,17 @@ high/low:
   "stop_rule": "chandelier",
   "stop_atr_period": 22,
   "stop_atr_multiplier": 3.0,
-  "take_profit_pct": null
+  "take_profit_pct": null,
+  "position_adjustment": "rebalance"
 }
 ```
+
+`position_adjustment` defaults to `"hold"`, which opens and closes positions but
+silently ignores every same-direction **resize**. An equal-weight book asks for
+one on nearly every entry and exit — 1.0, then 0.5, then 0.333 as names join —
+so the run holds a book the strategy never asked for while `rebalance_count`
+still reports the requests. The runner says so on stderr; the metrics do not.
+Set `"rebalance"` whenever weights vary, which is any basket strategy.
 
 **Chandelier Exit** (Chuck LeBeau): for a long, the highest high reached since
 entry minus `stop_atr_multiplier` ATRs. It ratchets — the level only moves in
@@ -115,19 +123,27 @@ config above):
 
 | Metric | Value |
 |---|---|
-| Total return | +38.1% |
-| Annual return | +11.3% |
-| Sharpe | 1.00 |
-| Max drawdown | -10.5% |
-| Trades | 29 |
-| Win rate | 34.5% |
-| Profit factor | 2.49 |
-| Exits by stop | 23 of 29 |
+| Total return | +8.6% |
+| Annual return | +2.8% |
+| Sharpe | 0.36 |
+| Max drawdown | -12.3% |
+| Trades | 57 |
+| Win rate | 50.9% |
+| Profit factor | 1.62 |
+| Avg holding | 7.4 days |
+| Exits | 20 stop, 21 rebalance, 15 signal, 1 end-of-run |
 
 Buy-and-hold over the same window returned +64%, so this trend-following
-example **underperforms its benchmark**. That is the expected shape for a
+example **underperforms its benchmark badly**. That is the expected shape for a
 trailing-stop trend system in a strong bull market, not a defect — it is
 included so the numbers are read honestly rather than as a promise.
+
+The same run under the default `position_adjustment: "hold"` reported +38.1%
+and a Sharpe of 1.00. That is not a better strategy, it is a different one: the
+engine dropped 42 resize requests, so the book held its first-entry weights
+instead of the equal weights the signal asked for, and the result flattered a
+strategy that was never run. Worth remembering whenever a Taiwan basket
+backtest looks unexpectedly good.
 
 ## Factors
 
