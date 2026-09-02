@@ -145,6 +145,38 @@ instead of the equal weights the signal asked for, and the result flattered a
 strategy that was never run. Worth remembering whenever a Taiwan basket
 backtest looks unexpectedly good.
 
+## Running this with a local model
+
+Measured on Qwen3.8-27B served by vLLM on one A100, driving the full agent
+loop. Two settings and two prompt rules took the same task from 1h39m with a
+degraded final answer to 11m33s with a clean one.
+
+In `agent/.env`:
+
+```bash
+VIBE_TRADING_LLM_TIMEOUT_SECONDS=900   # default 300
+TOKEN_THRESHOLD=24000                  # default 40000
+```
+
+The default 300s bounds the auto-compact summary call, not just a ReAct step. A
+27B writing a long structured summary overran it every time, so every
+compaction degraded. Lowering the threshold alongside it matters as much as
+raising the ceiling: compacting earlier makes each summary call smaller as well
+as giving it longer to finish.
+
+In the prompt:
+
+- **"Do not write extra analysis scripts."** Left alone the model wrote its own
+  attribution and shape-inspection scripts, spent the iteration budget on them,
+  and had none left to revise its answer.
+- **"Every number must come verbatim from a tool result; write 'not retrieved'
+  if you did not read it."** Without this it invented entry prices, the
+  grounding gate correctly rejected four drafts against the observed OHLC
+  range, and the run fell back to the deterministic answer.
+
+Neither rule is Taiwan-specific; they are here because this is the skill a
+Taiwan run loads.
+
 ## Factors
 
 `equity_tw` is a valid factor universe: `alpha list --universe equity_tw`, the
