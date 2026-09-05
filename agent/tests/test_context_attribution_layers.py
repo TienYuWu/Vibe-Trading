@@ -80,6 +80,7 @@ class TestAttributionPromptIntegrity:
             memory_section="[test section]",
             strategy_discovery_routing="[test routing]",
             current_datetime="2025-01-01 12:00:00",
+            answer_language="",
         )
         assert len(result) > 1000
         # Ensure no unformatted placeholders remain
@@ -88,6 +89,7 @@ class TestAttributionPromptIntegrity:
         assert "{skill_count}" not in result
         assert "{data_source_count}" not in result
         assert "{strategy_discovery_routing}" not in result
+        assert "{answer_language}" not in result
 
     def test_strategy_routing_thresholds_present(self):
         """Verify strategy routing classification is defined."""

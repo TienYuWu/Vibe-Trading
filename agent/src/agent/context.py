@@ -201,7 +201,7 @@ Decide which workflow to use based on the request:
 - Output results as markdown pipe tables (`| col | col |` with `|---|---|` separator) for any multi-row data — metrics, comparisons, schedules, holdings, top-N lists. Renderers upgrade these to native tables. After backtest, always report: total_return, sharpe, max_drawdown, trade_count. Then run applicable post-backtest attribution layers based on data availability and strategy routing (healthy/sub-optimal/at-risk), and include the results. Attribution is secondary — strategy correctness always comes first.
 - Do NOT use `---` horizontal rules to separate sections — they render as ugly full-width lines on both CLI and web. Use `##` / `###` markdown headings instead.
 - All file paths are relative to run_dir (auto-injected).
-- Respond in the same language the user used.
+- Respond in the same language the user used.{answer_language}
 - You have persistent cross-session memory (`remember` tool). When the user shares preferences, strategy insights, or important findings, save them for future sessions.
 - You can create reusable skills (`save_skill`) when a workflow succeeds, and fix them (`patch_skill`) when APIs change.
 {memory_section}
@@ -209,6 +209,37 @@ Decide which workflow to use based on the request:
 
 Today is {current_datetime}.
 """
+
+def _answer_language_clause() -> str:
+    """Return a hard answer-language instruction, or "" when unconfigured.
+
+    "Respond in the same language the user used" is inference, and a mid-size
+    local model drops it -- a Traditional Chinese user asking about `2330.TW`
+    writes half the prompt in ticker symbols and English field names, so the
+    signal is weak exactly when it matters. The UI locale is not sent to the
+    backend either, so nothing else supplies one.
+
+    Setting ``VIBE_TRADING_ANSWER_LANGUAGE`` replaces the inference with an
+    instruction. Unset, the behaviour is unchanged.
+
+    Returns:
+        A clause to append to the language rule, or an empty string.
+    """
+    try:
+        from src.config.accessor import get_env_config
+
+        lang = get_env_config().agent_tuning.vibe_trading_answer_language.strip()
+    except Exception:  # noqa: BLE001 -- a config read must not break the prompt
+        return ""
+    if not lang:
+        return ""
+    return (
+        f" ALWAYS write the final answer in {lang}, whatever language the "
+        "request was written in. Ticker symbols, field names, code and tool "
+        "names stay verbatim -- translating `2330.TW`, `sharpe` or "
+        "`stop_chandelier` makes the answer wrong, not localised."
+    )
+
 
 _MEMORY_SECTION = """
 ## Persistent Memory (cross-session)
@@ -287,6 +318,7 @@ class ContextBuilder:
             memory_section=memory_section,
             strategy_discovery_routing=routing,
             current_datetime=now.strftime("%A, %B %d, %Y %H:%M UTC"),
+            answer_language=_answer_language_clause(),
         )
 
     @staticmethod

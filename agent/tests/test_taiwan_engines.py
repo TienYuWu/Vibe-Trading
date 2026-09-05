@@ -756,3 +756,43 @@ class TestTaiwanIndexAndFuturesSymbols:
         """Its letters would otherwise be read as a TAIFEX product code."""
         dataset, _, is_derivative = _resolve_dataset("TAIEX")
         assert dataset == "TaiwanStockPrice" and is_derivative is False
+
+
+class TestAnswerLanguagePin:
+    """"Respond in the same language the user used" is inference, and a
+    mid-size local model drops it: a Taiwan prompt is mostly tickers and English
+    field names, so the signal is weakest exactly when it is needed. The Web UI
+    locale never reaches the backend, so nothing else supplies one.
+    """
+
+    def test_unset_leaves_the_prompt_unchanged(self, monkeypatch) -> None:
+        from src.agent import context
+
+        monkeypatch.delenv("VIBE_TRADING_ANSWER_LANGUAGE", raising=False)
+        from src.config.accessor import reset_env_config
+
+        reset_env_config()
+        assert context._answer_language_clause() == ""
+
+    def test_set_pins_the_language_and_protects_identifiers(self, monkeypatch) -> None:
+        from src.agent import context
+        from src.config.accessor import reset_env_config
+
+        monkeypatch.setenv("VIBE_TRADING_ANSWER_LANGUAGE", "Traditional Chinese")
+        reset_env_config()
+        clause = context._answer_language_clause()
+        reset_env_config()
+
+        assert "Traditional Chinese" in clause
+        # Translating a ticker or a metric name corrupts the answer.
+        assert "2330.TW" in clause and "sharpe" in clause
+
+    def test_blank_is_treated_as_unset(self, monkeypatch) -> None:
+        from src.agent import context
+        from src.config.accessor import reset_env_config
+
+        monkeypatch.setenv("VIBE_TRADING_ANSWER_LANGUAGE", "   ")
+        reset_env_config()
+        clause = context._answer_language_clause()
+        reset_env_config()
+        assert clause == ""

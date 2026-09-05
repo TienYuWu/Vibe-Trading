@@ -381,6 +381,12 @@ class AgentTuningConfig(_EnvBase):
     """
 
     token_threshold: int = Field(alias="TOKEN_THRESHOLD", default=40000)
+    # Pins the final-answer language. Empty keeps the default behaviour of
+    # inferring it from the user's message, which a mid-size local model
+    # drops when the prompt is mostly tickers and English field names.
+    vibe_trading_answer_language: str = Field(
+        alias="VIBE_TRADING_ANSWER_LANGUAGE", default=""
+    )
     vt_heartbeat_interval_s: float = Field(alias="VT_HEARTBEAT_INTERVAL_S", default=3.0)
     vt_reasoning_delta_min_interval_s: float = Field(
         alias="VT_REASONING_DELTA_MIN_INTERVAL_S", default=1.0,
