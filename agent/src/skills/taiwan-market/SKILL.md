@@ -162,6 +162,7 @@ In `agent/.env`:
 VIBE_TRADING_LLM_TIMEOUT_SECONDS=900   # default 300
 TOKEN_THRESHOLD=24000                  # default 40000
 VIBE_TRADING_SSE_TIMEOUT=900           # default 90
+VIBE_TRADING_RUN_STALL_TIMEOUT_SECONDS=3600   # default 1800
 ```
 
 The default 300s bounds the auto-compact summary call, not just a ReAct step. A
@@ -176,6 +177,13 @@ the run carries on, finishes, and writes a successful result nobody is
 watching. The GPU stays busy, which makes it read as a hang. Keep it at or
 above the LLM ceiling -- the page must not give up sooner than one backend call
 is allowed to take -- and look in `/reports` before assuming a run died.
+
+The fourth exists because raising the LLM ceiling alone sets a trap. MAX_RETRIES
+applies to the LLM call, so a call that never completes burns
+`LLM_TIMEOUT x (1 + MAX_RETRIES)` = 2700s at these values, while the run-stall
+watchdog defaults to 1800s and kills the run mid-retry with
+`run stalled: no LLM completion or tool result for 1849s`. The watchdog has to
+sit above that product, not above a single call.
 
 In the prompt:
 
