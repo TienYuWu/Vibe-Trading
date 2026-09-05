@@ -60,6 +60,22 @@ _CANADIAN_SYMBOL_RE = re.compile(r"^[A-Z0-9&.\-]+\.(?:TO|V)\b", re.IGNORECASE)
 _BARE_TW_CODE_RE = re.compile(r"^([1-9][0-9]{3}|00[0-9]{2,4}[A-Z]?)$", re.IGNORECASE)
 _TW_SUFFIXES = ("TW", "TWO")
 
+# Symbols FinMind serves that no listing table contains: TAIFEX products and
+# the index. The agent otherwise searched "TXF", "TXF2609", "TAIEX", "^TWSE"
+# and "000001.TW" in turn and found nothing, because Eastmoney and Yahoo have
+# no Taiwan derivatives and the index is not a listed security.
+_TW_STATIC_SYMBOLS: Dict[str, Dict[str, str]] = {
+    "TAIEX": {"symbol": "TAIEX", "name": "發行量加權股價指數 (TAIEX)", "type": "index"},
+    "TXF": {"symbol": "TXF", "name": "臺股期貨 (大台)", "type": "futures"},
+    "MXF": {"symbol": "MXF", "name": "小型臺指期貨 (小台)", "type": "futures"},
+    "TMF": {"symbol": "TMF", "name": "微型臺指期貨 (微台)", "type": "futures"},
+    "TE": {"symbol": "TE.TAIFEX", "name": "電子期貨", "type": "futures"},
+    "TF": {"symbol": "TF.TAIFEX", "name": "金融期貨", "type": "futures"},
+    "TXO": {"symbol": "TXO", "name": "臺指選擇權", "type": "options"},
+}
+# A query may carry a delivery month (TXF2609) or the Yahoo index spelling.
+_TW_STATIC_ALIASES = {"^TWII": "TAIEX", "TAIEX.TW": "TAIEX", "TWII": "TAIEX"}
+
 # Eastmoney market-number -> our symbol suffix. Anything else is left unmapped
 # (those candidates are skipped rather than emitted with a wrong suffix).
 _EASTMONEY_SUFFIX_BY_MARKET: Dict[str, str] = {
@@ -192,7 +208,14 @@ class SymbolSearchTool(BaseTool):
         # to two entities and reject every downstream call. Only a code FinMind
         # confirmed as listed narrows the set, so an unconfirmed query keeps
         # whatever the other sources found.
-        if fm_hits and _is_bare_tw_code(query):
+        static = _tw_static_candidate(query)
+        if static is not None:
+            # An exact TAIFEX product or index name is an identity, not a
+            # fuzzy match. Yahoo answers "TAIEX" with whatever ETF prospectus
+            # mentions the index (00686R.TW, 00663L.TW, ...), which is noise
+            # the identity gate would have to arbitrate. Return the one symbol.
+            candidates = [static]
+        elif fm_hits and _is_bare_tw_code(query):
             candidates = [
                 c for c in candidates if _is_tw_symbol(str(c.get("symbol") or ""))
             ]
@@ -279,6 +302,32 @@ def _is_tw_symbol(text: str) -> bool:
     return head.rpartition(".")[2] in _TW_SUFFIXES
 
 
+def _tw_static_candidate(query: str) -> Optional[Dict[str, Any]]:
+    """Resolve a TAIFEX product or the index, neither of which is a listing.
+
+    Args:
+        query: Free-text query, optionally carrying a delivery month.
+
+    Returns:
+        A candidate dict, or None when the query names neither.
+    """
+    head = (query or "").strip().upper().split()[0] if (query or "").strip() else ""
+    if not head:
+        return None
+    head = _TW_STATIC_ALIASES.get(head, head)
+    if head in _TW_STATIC_SYMBOLS:
+        row = _TW_STATIC_SYMBOLS[head]
+    else:
+        # Strip a delivery month / venue suffix: TXF2609, TE2609.TAIFEX.
+        product = "".join(ch for ch in head.split(".")[0] if ch.isalpha())
+        row = _TW_STATIC_SYMBOLS.get(product)
+        if row is None:
+            return None
+        # Keep the caller's fully qualified contract rather than the product.
+        row = {**row, "symbol": head}
+    return {**row, "market": "tw", "source": "finmind"}
+
+
 def _search_finmind(query: str) -> tuple[List[Dict[str, Any]], str]:
     """Resolve a bare Taiwan listing code against FinMind's listing table.
 
@@ -296,8 +345,13 @@ def _search_finmind(query: str) -> tuple[List[Dict[str, Any]], str]:
         when the query shape is not a bare Taiwan code, or an error string.
     """
     code = (query or "").strip().upper()
+
+    static = _tw_static_candidate(code)
+    if static is not None:
+        return [static], "ok"
+
     if not _is_bare_tw_code(code):
-        return [], _SKIPPED + "query is not a bare Taiwan listing code"
+        return [], _SKIPPED + "query is not a Taiwan listing code, index or TAIFEX product"
 
     try:
         from backtest.loaders.finmind_loader import fetch_listing

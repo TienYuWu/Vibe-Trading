@@ -43,6 +43,11 @@ _MARKET_PATTERNS = [
     # .TAIFEX suffix.
     (re.compile(r"^(TXF|MXF|TMF)\d*$", re.I), "tw_futures"),
     (re.compile(r"^[A-Z]{2,4}\d*\.TAIFEX$", re.I), "tw_futures"),
+    # TAIEX itself. Must precede the bare-US-ticker rule at the end, which
+    # matches any 1-5 letter token and would route the Taiwan index to a US
+    # loader. The index is priced by the cash market, so it belongs to
+    # tw_equity even though nothing can trade it directly.
+    (re.compile(r"^(TAIEX|\^TWII)(\.TW)?$", re.I), "tw_equity"),
     # Canada equities: Toronto Stock Exchange (TD.TO) and TSX Venture
     # (PNG.V). Yahoo carries both suffixes verbatim.
     (re.compile(r"^[A-Z0-9&.\-]+\.(TO|V)$", re.I), "ca_equity"),

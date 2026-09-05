@@ -45,6 +45,14 @@ _FUTURES_DATA_ID: dict[str, str] = {
 }
 _OPTION_DATA_ID: dict[str, str] = {"TXO": "TXO"}
 
+# Taiwan indices. Keyed on the whole symbol rather than its letters because
+# ``TAIEX`` would otherwise be read as a futures product code.
+_INDEX_DATA_ID: dict[str, str] = {
+    "TAIEX": "TAIEX",
+    "^TWII": "TAIEX",     # the Yahoo spelling, accepted so a caller need not know ours
+    "TAIEX.TW": "TAIEX",
+}
+
 _OHLCV = ["open", "high", "low", "close", "volume"]
 
 # Optional columns, emitted only when the dataset carries them.
@@ -193,6 +201,12 @@ def _resolve_dataset(code: str) -> tuple[str, str, bool]:
         return "TaiwanOptionDaily", _OPTION_DATA_ID[product], True
     if product in _FUTURES_DATA_ID:
         return "TaiwanFuturesDaily", _FUTURES_DATA_ID[product], True
+    # TAIEX (發行量加權股價指數). FinMind serves it from the equity price table
+    # under a non-numeric data_id, so it must be matched before the numeric
+    # fallback below. Volume and turnover are market-wide totals, not a
+    # tradeable quantity -- the index itself cannot be bought.
+    if base in _INDEX_DATA_ID:
+        return "TaiwanStockPrice", _INDEX_DATA_ID[base], False
     # Cash equity: FinMind wants the bare numeric code (2330.TW -> 2330).
     return "TaiwanStockPrice", code.split(".")[0], False
 

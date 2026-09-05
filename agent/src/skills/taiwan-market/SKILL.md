@@ -21,9 +21,14 @@ strategy that looks profitable without the price band, the tick grid and the
 | `00NNNN.TW` | ETF (finer tick table) | `0050.TW`, `00632R.TW` |
 | `TXF` / `MXF` / `TMF` + contract | TAIFEX index futures | `TXF2608` |
 | `<PRODUCT>.TAIFEX` | TAIFEX, explicit suffix | `TE2608.TAIFEX` |
+| `TAIEX` | 發行量加權股價指數 | `TAIEX`, `^TWII` |
 
 `TE` and `TF` **require** the `.TAIFEX` suffix — bare `TF2406` is CFFEX bond
 futures and routes to the China futures engine.
+
+`TAIEX` is the index, served from FinMind's equity price table. Its volume and
+turnover are market-wide totals, not a tradeable quantity: nothing buys the
+index directly, so it belongs in a report, not in `codes`.
 
 ## Data
 

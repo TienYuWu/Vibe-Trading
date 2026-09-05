@@ -702,3 +702,57 @@ class TestTaiwanSymbolSearch:
         candidates, status = _search_finmind("AAPL")
         assert candidates == []
         assert status.startswith(_SKIPPED)
+
+
+class TestTaiwanIndexAndFuturesSymbols:
+    """TAIFEX products and the index are not listings, so no listing table has
+    them. An agent asked for a Taiwan close scan searched TXF, TXF2609, TAIEX,
+    ^TWSE and 000001.TW in turn and found nothing, because Eastmoney and Yahoo
+    carry no Taiwan derivatives and the index is not a listed security.
+    """
+
+    @pytest.mark.parametrize(
+        "query, expected",
+        [
+            ("TAIEX", "TAIEX"),
+            ("^TWII", "TAIEX"),      # the Yahoo spelling
+            ("TAIEX.TW", "TAIEX"),
+            ("TXF", "TXF"),
+            ("TXF2609", "TXF2609"),  # a delivery month is kept, not stripped
+            ("MXF2609", "MXF2609"),
+            ("TE2609.TAIFEX", "TE2609.TAIFEX"),
+            ("TXO", "TXO"),
+        ],
+    )
+    def test_static_symbols_resolve(self, query: str, expected: str) -> None:
+        from src.tools.symbol_search_tool import _tw_static_candidate
+
+        hit = _tw_static_candidate(query)
+        assert hit is not None and hit["symbol"] == expected
+        assert hit["market"] == "tw"
+
+    @pytest.mark.parametrize("query", ["AAPL", "2330", "0700", "", "TSLA"])
+    def test_non_taiwan_queries_are_not_claimed(self, query: str) -> None:
+        from src.tools.symbol_search_tool import _tw_static_candidate
+
+        assert _tw_static_candidate(query) is None
+
+    @pytest.mark.parametrize(
+        "symbol, market",
+        [("TAIEX", "tw_equity"), ("^TWII", "tw_equity"), ("TAIEX.TW", "tw_equity")],
+    )
+    def test_index_routes_to_taiwan_not_a_us_ticker(self, symbol: str, market: str) -> None:
+        """``TAIEX`` is five letters, so upstream's bare-US-ticker rule would
+        claim it and send the Taiwan index to a US loader."""
+        assert _detect_market(symbol) == market
+
+    def test_index_resolves_to_the_equity_price_table(self) -> None:
+        """FinMind serves TAIEX from TaiwanStockPrice under a non-numeric
+        data_id, so it must be matched before the numeric fallback."""
+        assert _resolve_dataset("TAIEX") == ("TaiwanStockPrice", "TAIEX", False)
+        assert _resolve_dataset("^TWII") == ("TaiwanStockPrice", "TAIEX", False)
+
+    def test_index_is_not_treated_as_a_futures_product(self) -> None:
+        """Its letters would otherwise be read as a TAIFEX product code."""
+        dataset, _, is_derivative = _resolve_dataset("TAIEX")
+        assert dataset == "TaiwanStockPrice" and is_derivative is False

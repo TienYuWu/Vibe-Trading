@@ -85,7 +85,8 @@ report, not a gap to fill.
 
 Markdown, in this order:
 
-1. `## Session` — the date this report covers, and the TAIEX close for it.
+1. `## Session` — the date this report covers, and the `TAIEX` close for it
+   (the index symbol is `TAIEX`; the same daily source serves it).
 2. `## Breakouts` — symbols that newly satisfied both entry conditions on this
    session. Write `none` when there were none.
 3. `## Open states` — table: symbol, close, Chandelier level, distance to the
