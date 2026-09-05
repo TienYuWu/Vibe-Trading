@@ -161,6 +161,7 @@ In `agent/.env`:
 ```bash
 VIBE_TRADING_LLM_TIMEOUT_SECONDS=900   # default 300
 TOKEN_THRESHOLD=24000                  # default 40000
+VIBE_TRADING_SSE_TIMEOUT=900           # default 90
 ```
 
 The default 300s bounds the auto-compact summary call, not just a ReAct step. A
@@ -168,6 +169,13 @@ The default 300s bounds the auto-compact summary call, not just a ReAct step. A
 compaction degraded. Lowering the threshold alongside it matters as much as
 raising the ceiling: compacting earlier makes each summary call smaller as well
 as giving it longer to finish.
+
+The third is the browser's, not the backend's, and it is the one that looks
+like a crash: at the 90s default the page reports "Execution timed out" while
+the run carries on, finishes, and writes a successful result nobody is
+watching. The GPU stays busy, which makes it read as a hang. Keep it at or
+above the LLM ceiling -- the page must not give up sooner than one backend call
+is allowed to take -- and look in `/reports` before assuming a run died.
 
 In the prompt:
 

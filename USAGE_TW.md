@@ -15,6 +15,13 @@ ssh -i C:\Users\NCKU_CSIE_RL_Tien\.ssh\A100_ed25519 -p 31598 `
     -N -L 0.0.0.0:8000:localhost:8000 root@140.116.154.4
 ```
 
+先測，有回應就不用重開 tunnel（OpenSSH 對已佔用的 port 會誤報成
+`bind: Permission denied`，那是 address already in use，不是權限問題）：
+
+```bash
+curl.exe -s --max-time 5 http://localhost:8000/v1/models
+```
+
 ```bash
 # 2. 起服務
 docker compose up -d
@@ -194,6 +201,7 @@ FinMind 免費層是日線。**盤中提醒做不到**，最快是收盤後掃�
 | agent 說台股功能不存在 | image 沒重建 → `docker compose build vibe-trading` |
 | 回答降級成 fallback | 模型編了數字被 gate 擋下 → prompt 加「數字必須逐字來自工具」 |
 | 跑超過 30 分鐘 | 壓縮逾時 → 確認 `agent/.env` 有 `VIBE_TRADING_LLM_TIMEOUT_SECONDS=900` 和 `TOKEN_THRESHOLD=24000` |
+| **網頁停住，但 A100 還在跑** | 不是當機。前端 SSE 閒置逾時（預設 90 秒）放棄了，後端照常跑完並寫入結果。先去 `/reports` 找那次 run，多半是 `success`。設 `VIBE_TRADING_SSE_TIMEOUT=900` |
 | 排程沒推播 | 任務沒填 delivery channel，或 `/settings` 通道沒啟動 |
 | 回測數字好得離譜 | 先看 `position_adjustment`，再看 Code 分頁確認有 `.shift(1)` |
 
