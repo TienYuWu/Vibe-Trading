@@ -226,8 +226,32 @@ def _resolve_sections(sections: Optional[List[str]]) -> List[str]:
 
 
 def _market_for(ticker: str) -> str:
-    """Classify a ticker into a coarse market label for the envelope."""
-    return "hk" if ticker.strip().upper().endswith(".HK") else "us"
+    """Classify a ticker into a coarse market label for the envelope.
+
+    Anything unrecognised used to fall through to ``"us"``, which is worse than
+    an error for a cross-market caller: Yahoo answers ``2330.TW`` happily, so
+    the envelope claimed a TWD enterprise value of 6.0e13 was a US figure and
+    invited comparison against TSM.US's USD 1.5e13 -- a 30x unit error that
+    looks like a valuation gap.
+    """
+    upper = ticker.strip().upper()
+    if upper.endswith(".HK"):
+        return "hk"
+    if upper.endswith((".TW", ".TWO")):
+        return "tw"
+    return "us"
+
+
+def _currency_for(ticker: str) -> str:
+    """Settlement currency for *ticker*, so figures are never unit-ambiguous.
+
+    Derived from the symbol rather than fetched: the suffix already determines
+    the venue, and an extra Yahoo module would add a request that can fail and
+    leave the amounts unlabelled.
+    """
+    from backtest.engines._market_hooks import code_currency
+
+    return code_currency(ticker.strip().upper())
 
 
 class StockProfileTool(BaseTool):
@@ -235,11 +259,14 @@ class StockProfileTool(BaseTool):
 
     name = "get_stock_profile"
     description = (
-        "Fetch a read-only company profile for a US or Hong Kong listing from "
+        "Fetch a read-only company profile for a US, Hong Kong or Taiwan "
+        "listing from "
         "Yahoo Finance: valuation key statistics, analyst price targets and "
         "earnings/revenue estimates, institutional and insider ownership, and "
         "the analyst recommendation trend. Use this for fundamentals and "
         "consensus context, not for OHLCV price bars (use get_market_data). "
+        "Every amount is in the envelope's 'currency' field -- never compare "
+        "figures across two profiles without checking it matches. "
         'Example: get_stock_profile(ticker="AAPL.US", '
         'sections=["key_stats", "financials"]).'
     )
@@ -280,7 +307,7 @@ class StockProfileTool(BaseTool):
 
         Returns:
             A JSON envelope string. On success:
-            ``{"ok": true, "market": str, "source": "yahoo",
+            ``{"ok": true, "market": str, "currency": str, "source": "yahoo",
             "data": {"ticker": str, "sections": {<name>: <shaped>}}}``.
             On failure: ``{"ok": false, "error": str}``.
         """
@@ -309,6 +336,7 @@ class StockProfileTool(BaseTool):
             {
                 "ok": True,
                 "market": _market_for(ticker),
+                "currency": _currency_for(ticker),
                 "source": "yahoo",
                 "data": {"ticker": ticker, "sections": shaped},
             },

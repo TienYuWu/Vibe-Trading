@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backtest.loaders import eastmoney_client, yahoo_client
@@ -43,6 +43,12 @@ _EM_NEWS_URL = "https://search-api-web.eastmoney.com/search/jsonp"
 _EM_SUFFIXES = ("SH", "SZ", "BJ")
 # Suffixes that route to Yahoo's search-news surface.
 _YAHOO_SUFFIXES = ("US", "HK")
+_FINMIND_SUFFIXES = ("TW", "TWO")
+_FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+# FinMind serves this dataset one calendar day per request, so a lookback is a
+# loop. Ten days covers a long weekend plus a holiday without hammering a free
+# endpoint for a quiet name.
+_FINMIND_LOOKBACK_DAYS = 10
 
 # Default broad-market query used when ``scope='global'`` carries no code.
 _GLOBAL_QUERY = "财经"
@@ -195,6 +201,72 @@ def _fetch_eastmoney_news(query: str, limit: int) -> list[dict[str, Any]]:
     if not isinstance(articles, list):
         return []
     return [_em_article(a) for a in articles if isinstance(a, dict)][:limit]
+
+
+def _finmind_article(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project one FinMind news row into the shared article shape.
+
+    FinMind publishes ``date``/``title``/``link``/``source`` and no summary, so
+    ``snippet`` is left None rather than echoing the title -- a duplicated
+    headline reads as corroboration the source never gave.
+    """
+    return {
+        "title": _snippet(raw.get("title")),
+        "url": raw.get("link"),
+        "source": raw.get("source"),
+        "published": raw.get("date"),
+        "snippet": None,
+    }
+
+
+def _fetch_finmind_news(code: str, limit: int) -> list[dict[str, Any]]:
+    """Fetch recent Taiwan headlines for one listing code.
+
+    FinMind refuses a multi-day window on this dataset ("the dataset
+    TaiwanStockNews size is too large, we only send one day data"), so this
+    walks back day by day until it has enough or runs out of lookback. A
+    market holiday simply yields nothing for that date.
+
+    Args:
+        code: Bare listing code (``2330``).
+        limit: Maximum articles to return.
+
+    Returns:
+        Articles newest-first, at most *limit*.
+    """
+    import requests
+
+    from src.config.accessor import get_env_config
+
+    token = get_env_config().data.finmind_token.strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    out: list[dict[str, Any]] = []
+    today = datetime.now(tz=timezone.utc).date()
+    for back in range(_FINMIND_LOOKBACK_DAYS):
+        if len(out) >= limit:
+            break
+        day = (today - timedelta(days=back)).isoformat()
+        resp = requests.get(
+            _FINMIND_URL,
+            params={
+                "dataset": "TaiwanStockNews",
+                "data_id": code,
+                "start_date": day,
+                "end_date": day,
+            },
+            headers=headers,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("status") != 200:
+            raise RuntimeError(str(body.get("msg", body))[:160])
+        for row in body.get("data") or []:
+            out.append(_finmind_article(row))
+            if len(out) >= limit:
+                break
+    return out
 
 
 def _yahoo_article(raw: dict[str, Any]) -> dict[str, Any]:
@@ -354,9 +426,11 @@ class StockNewsTool(BaseTool):
             return self._stock_via_eastmoney(code, query, limit)
         if suffix in _YAHOO_SUFFIXES:
             return self._stock_via_yahoo(code, query, limit)
+        if suffix in _FINMIND_SUFFIXES:
+            return self._stock_via_finmind(code, query, limit)
         return self._error(
             f"unsupported market for code {code!r}; expected suffix in "
-            f"{_EM_SUFFIXES + _YAHOO_SUFFIXES}"
+            f"{_EM_SUFFIXES + _YAHOO_SUFFIXES + _FINMIND_SUFFIXES}"
         )
 
     def _stock_via_eastmoney(self, code: str, query: str, limit: int) -> str:
@@ -383,6 +457,19 @@ class StockNewsTool(BaseTool):
         return self._ok(
             market,
             "yahoo",
+            {"scope": "stock", "code": code, "articles": articles},
+        )
+
+    def _stock_via_finmind(self, code: str, query: str, limit: int) -> str:
+        """Fetch Taiwan headlines from FinMind for one code."""
+        try:
+            articles = _fetch_finmind_news(query, limit)
+        except Exception as exc:  # noqa: BLE001 - surface any fetch failure as envelope
+            logger.warning("finmind news fetch failed for %s: %s", code, exc)
+            return self._error(f"finmind news fetch failed: {exc}")
+        return self._ok(
+            "tw",
+            "finmind",
             {"scope": "stock", "code": code, "articles": articles},
         )
 

@@ -150,6 +150,19 @@ instead of the equal weights the signal asked for, and the result flattered a
 strategy that was never run. Worth remembering whenever a Taiwan basket
 backtest looks unexpectedly good.
 
+## Fundamentals, news and profile
+
+| Tool | Taiwan source | Note |
+|---|---|---|
+| `get_financial_statements` | FinMind | Quarterly only — an `annual` request returns the Q4 close, because Taiwan issuers file no separate annual report. Amounts are TWD. |
+| `get_stock_news` | FinMind | Served one calendar day per request, so the tool walks back up to 10 days. No summary field: `snippet` stays null rather than echoing the headline. |
+| `get_stock_profile` | Yahoo | Answers for `.TW`, and the envelope now carries `market: "tw"` and `currency: "TWD"`. |
+
+**Check `currency` before comparing two profiles.** Yahoo answers `2330.TW`
+with an enterprise value of 6.0e13 TWD and `TSM.US` with 1.5e13 USD. Those are
+the same company; the 30x gap is the exchange rate, not a valuation. The
+profile tool used to label both `us`, which is how that comparison got made.
+
 ## Running this with a local model
 
 Measured on Qwen3.8-27B served by vLLM on one A100, driving the full agent

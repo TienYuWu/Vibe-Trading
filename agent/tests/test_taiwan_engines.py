@@ -796,3 +796,70 @@ class TestAnswerLanguagePin:
         clause = context._answer_language_clause()
         reset_env_config()
         assert clause == ""
+
+
+class TestTaiwanFundamentalsAndNews:
+    """`.TW` was absent from three tools' market whitelists, so a Taiwan
+    research run got a red X on financials and news and silently fell back to
+    the US ADR. The profile tool was worse: it answered, and labelled a TWD
+    figure as a US one.
+    """
+
+    @pytest.mark.parametrize(
+        "code, expected",
+        [("2330.TW", "tw"), ("6488.TWO", "tw"), ("AAPL.US", "us"),
+         ("00700.HK", "hk"), ("600519.SH", "a_share")],
+    )
+    def test_financials_classifies_taiwan(self, code: str, expected: str) -> None:
+        from src.tools.financial_statements_tool import _classify_market
+
+        assert _classify_market(code) == expected
+
+    @pytest.mark.parametrize(
+        "ticker, market, currency",
+        [("2330.TW", "tw", "TWD"), ("6488.TWO", "tw", "TWD"),
+         ("AAPL.US", "us", "USD"), ("00700.HK", "hk", "HKD")],
+    )
+    def test_profile_labels_market_and_currency(
+        self, ticker: str, market: str, currency: str
+    ) -> None:
+        """A missing currency is how a TWD enterprise value of 6.0e13 got
+        compared against a USD 1.5e13 as if the gap were a valuation."""
+        from src.tools.stock_profile_tool import _currency_for, _market_for
+
+        assert _market_for(ticker) == market
+        assert _currency_for(ticker) == currency
+
+    def test_profile_no_longer_calls_taiwan_a_us_listing(self) -> None:
+        from src.tools.stock_profile_tool import _market_for
+
+        assert _market_for("2330.TW") != "us"
+
+    def test_news_routes_taiwan_to_finmind(self) -> None:
+        from src.tools import stock_news_tool as m
+
+        assert "TW" in m._FINMIND_SUFFIXES and "TWO" in m._FINMIND_SUFFIXES
+        assert "TW" not in m._YAHOO_SUFFIXES  # Yahoo has no Taiwan news feed
+
+    def test_news_article_shape_leaves_snippet_empty(self) -> None:
+        """FinMind publishes no summary. Echoing the title into `snippet`
+        would read as corroboration the source never gave."""
+        from src.tools.stock_news_tool import _finmind_article
+
+        art = _finmind_article(
+            {"date": "2026-09-04", "title": "T", "link": "http://x", "source": "CMoney"}
+        )
+        assert art["snippet"] is None
+        assert art["published"] == "2026-09-04" and art["url"] == "http://x"
+
+    @pytest.mark.parametrize(
+        "statement, dataset",
+        [("balance", "TaiwanStockBalanceSheet"),
+         ("income", "TaiwanStockFinancialStatements"),
+         ("cashflow", "TaiwanStockCashFlowsStatement"),
+         ("indicators", "TaiwanStockFinancialStatements")],
+    )
+    def test_each_statement_maps_to_a_dataset(self, statement: str, dataset: str) -> None:
+        from src.tools.financial_statements_tool import _FINMIND_DATASET
+
+        assert _FINMIND_DATASET[statement] == dataset

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backtest.loaders import sec_frames
@@ -489,6 +490,85 @@ def _merge_sec_instants(
     ]
 
 
+_FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+
+# FinMind splits Taiwan filings across three datasets; "indicators" is served
+# from the income statement, which carries EPS and the margin inputs.
+_FINMIND_DATASET = {
+    "balance": "TaiwanStockBalanceSheet",
+    "income": "TaiwanStockFinancialStatements",
+    "cashflow": "TaiwanStockCashFlowsStatement",
+    "indicators": "TaiwanStockFinancialStatements",
+}
+
+# Taiwan issuers file quarterly only; there is no separate annual filing to
+# fetch, so an annual request is served by tagging Q4 rows. Ten years back is
+# enough for any screen this tool feeds and bounds the response size.
+_FINMIND_YEARS_BACK = 10
+
+
+def _fetch_finmind_statement(code: str, *, statement: str, period: str) -> dict[str, Any]:
+    """Fetch one Taiwan statement from FinMind, shaped as flat periods.
+
+    FinMind returns long-form rows -- one ``(date, type, value)`` per line item
+    -- so they are pivoted into the same per-period dict shape the SEC and
+    Eastmoney paths produce. Amounts are TWD, which the envelope states.
+
+    Args:
+        code: Taiwan symbol with a ``.TW``/``.TWO`` suffix.
+        statement: One of :data:`_VALID_STATEMENTS`.
+        period: ``"annual"`` or ``"quarter"``. Taiwan files quarterly, so
+            ``annual`` keeps only the Q4 (December) filing of each year.
+
+    Returns:
+        ``{"periods": [...]}`` on success or ``{"error": ...}`` on failure.
+    """
+    import requests
+
+    from src.config.accessor import get_env_config
+
+    bare = code.rsplit(".", 1)[0].strip().upper()
+    dataset = _FINMIND_DATASET.get(statement)
+    if dataset is None:
+        return {"error": f"unsupported statement for Taiwan: {statement!r}"}
+
+    token = get_env_config().data.finmind_token.strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    start = (datetime.now(tz=timezone.utc).date() - timedelta(days=365 * _FINMIND_YEARS_BACK)).isoformat()
+    end = datetime.now(tz=timezone.utc).date().isoformat()
+
+    try:
+        resp = requests.get(
+            _FINMIND_URL,
+            params={"dataset": dataset, "data_id": bare,
+                    "start_date": start, "end_date": end},
+            headers=headers,
+            timeout=40,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 - surface provider failures as envelope
+        logger.warning("FinMind statement fetch failed for %s: %s", code, exc)
+        return {"error": f"FinMind request failed: {exc}"}
+
+    if body.get("status") != 200:
+        return {"error": f"FinMind error: {str(body.get('msg', body))[:160]}"}
+
+    by_date: dict[str, dict[str, Any]] = {}
+    for row in body.get("data") or []:
+        date = str(row.get("date") or "").strip()
+        name = str(row.get("type") or "").strip()
+        if not date or not name:
+            continue
+        by_date.setdefault(date, {"period_end": date})[name] = row.get("value")
+
+    periods = [by_date[d] for d in sorted(by_date, reverse=True)]
+    if period == "annual":
+        # No annual filing exists; December is the full-year close.
+        periods = [p for p in periods if str(p["period_end"])[5:7] == "12"]
+    return {"periods": periods}
+
+
 def _fetch_sec_statement(code: str, *, statement: str, period: str) -> dict[str, Any]:
     """Fetch one US statement from SEC companyfacts, shaped as flat periods.
 
@@ -583,6 +663,8 @@ def _classify_market(code: str) -> str | None:
         return "us"
     if suffix == "HK":
         return "hk"
+    if suffix in ("TW", "TWO"):
+        return "tw"
     return None
 
 
@@ -593,9 +675,11 @@ class FinancialStatementsTool(BaseTool):
     description = (
         "Fetch a single stock's financial statements: balance sheet, income "
         "statement, cash-flow statement, or key per-period indicators (margins, "
-        "ROE, EPS, etc.). Markets: A-share (.SH/.SZ/.BJ), US (.US) and "
-        "Hong Kong (.HK). US uses SEC EDGAR companyfacts; A-share and HK use "
-        "Eastmoney. Reports come back newest-first as flat per-period rows. Use "
+        "ROE, EPS, etc.). Markets: A-share (.SH/.SZ/.BJ), US (.US), "
+        "Hong Kong (.HK) and Taiwan (.TW/.TWO). US uses SEC EDGAR "
+        "companyfacts; A-share and HK use Eastmoney; Taiwan uses FinMind, "
+        "which files quarterly only -- an annual request returns the Q4 close. "
+        "Taiwan amounts are TWD. Reports come back newest-first as flat per-period rows. Use "
         'this to read fundamentals before building a valuation or screen. Example: '
         '{"code": "600519.SH", "statement": "income", "period": "annual"}.'
     )
@@ -673,12 +757,16 @@ class FinancialStatementsTool(BaseTool):
         market = _classify_market(code)
         if market is None:
             return _error(
-                "code must carry a supported suffix: .SH/.SZ/.BJ, .US, or .HK"
+                "code must carry a supported suffix: .SH/.SZ/.BJ, .US, .HK, "
+                ".TW or .TWO"
             )
 
         if market == "us":
             result = _fetch_sec_statement(code, statement=statement, period=period)
             source = "sec_edgar"
+        elif market == "tw":
+            result = _fetch_finmind_statement(code, statement=statement, period=period)
+            source = "finmind"
         else:
             result = _fetch_eastmoney_statement(
                 code, statement=statement, period=period
