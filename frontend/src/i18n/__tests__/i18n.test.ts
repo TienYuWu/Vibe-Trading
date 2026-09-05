@@ -140,6 +140,7 @@ describe("i18n utilities", () => {
   it("isRtl returns false for LTR languages", () => {
     expect(isRtl("en")).toBe(false);
     expect(isRtl("zh-CN")).toBe(false);
+    expect(isRtl("zh-TW")).toBe(false);
     expect(isRtl("ja")).toBe(false);
     expect(isRtl("ko")).toBe(false);
   });
@@ -159,7 +160,7 @@ describe("i18n utilities", () => {
     // the order the switcher renders, and that "en" stays first so the
     // primary-match fallback in Layout resolves regional codes to it.
     const codes = SUPPORTED_LANGUAGES.map((l) => l.code);
-    expect(codes).toEqual(["en", "zh-CN", "ja", "ko", "ar", "es", "de"]);
+    expect(codes).toEqual(["en", "zh-CN", "zh-TW", "ja", "ko", "ar", "es", "de"]);
   });
 
   it("accepts zh-CN as an explicit supported language", async () => {

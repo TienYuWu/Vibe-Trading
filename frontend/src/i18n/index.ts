@@ -9,7 +9,8 @@ import en from "./locales/en.json";
 // layout (sidebar on the right, etc.) when needed.
 export const SUPPORTED_LANGUAGES = [
   { code: "en", label: "English", dir: "ltr" as const },
-  { code: "zh-CN", label: "中文", dir: "ltr" as const },
+  { code: "zh-CN", label: "简体中文", dir: "ltr" as const },
+  { code: "zh-TW", label: "繁體中文", dir: "ltr" as const },
   { code: "ja", label: "日本語", dir: "ltr" as const },
   { code: "ko", label: "한국어", dir: "ltr" as const },
   { code: "ar", label: "العربية", dir: "rtl" as const },
@@ -22,6 +23,7 @@ type LazyLanguageCode = Exclude<SupportedLanguageCode, "en">;
 
 const localeLoaders = {
   "zh-CN": () => import("./locales/zh-CN.json"),
+  "zh-TW": () => import("./locales/zh-TW.json"),
   ja: () => import("./locales/ja.json"),
   ko: () => import("./locales/ko.json"),
   ar: () => import("./locales/ar.json"),
