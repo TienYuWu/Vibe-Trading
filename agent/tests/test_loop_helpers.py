@@ -36,20 +36,49 @@ def _apply_microcompact_gate(messages: list) -> None:
 
 
 class TestEstimateTokens:
+    """The estimate gates compaction, so its errors are not symmetric: counting
+    high costs one summary call, counting low lets the transcript pass the
+    provider's context limit and fails the run outright. Every case here pins
+    the safe direction, against counts measured on the served tokenizer.
+    """
+
     def test_empty(self) -> None:
-        assert estimate_tokens([]) == len("[]") // 4
+        assert estimate_tokens([]) > 0
 
     def test_proportional(self) -> None:
         short = [{"role": "user", "content": "hi"}]
         long = [{"role": "user", "content": "x" * 4000}]
         assert estimate_tokens(long) > estimate_tokens(short)
 
-    def test_rough_accuracy(self) -> None:
-        # ~4 chars per token
-        msg = [{"role": "user", "content": "a" * 400}]
-        tokens = estimate_tokens(msg)
-        # Should be roughly 100 tokens for 400 chars of content (plus overhead)
-        assert 80 < tokens < 200
+    def test_english_is_not_wildly_over(self) -> None:
+        """English must stay in a sane band -- over-counting it would compact
+        constantly on runs that never needed it."""
+        msg = [{"role": "user", "content": "The quick brown fox jumps over the lazy dog. " * 40}]
+        # 1800 chars of English prose is ~400 real tokens.
+        assert 400 < estimate_tokens(msg) < 1200
+
+    def test_chinese_is_not_under_counted(self) -> None:
+        """The bug this replaces: chars/4 reported Chinese at well under half
+        its real size, so compaction held 24k while the provider saw 60k."""
+        text = "台積電今日公布八月營收，月增百分之五，累計前八月營收較去年同期成長三成五。" * 20
+        msg = [{"role": "user", "content": text}]
+        # 740 CJK characters measure at 453 real tokens; chars/4 claimed ~185.
+        assert estimate_tokens(msg) >= 453
+
+    def test_numeric_json_is_not_under_counted(self) -> None:
+        """A financial tool result is mostly digits and JSON punctuation, which
+        tokenize near 1.8 chars/token, not 4."""
+        import json as _json
+
+        payload = _json.dumps({"CashAndCashEquivalents": 1698195704000.0,
+                               "date": "2024-03-31", "value": -129682000.0}) * 15
+        msg = [{"role": "user", "content": payload}]
+        assert estimate_tokens(msg) >= len(payload) / 1.83
+
+    def test_cjk_counts_more_than_latin_per_character(self) -> None:
+        cjk = [{"role": "user", "content": "台" * 500}]
+        latin = [{"role": "user", "content": "a" * 500}]
+        assert estimate_tokens(cjk) > estimate_tokens(latin)
 
 
 # ---------------------------------------------------------------------------

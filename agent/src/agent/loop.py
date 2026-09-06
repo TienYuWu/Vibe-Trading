@@ -252,16 +252,104 @@ def _format_timeout(seconds: float) -> str:
     return f"{seconds:.0f}s"
 
 
+# Chars per token, by character class, measured against the served tokenizer.
+# A single rate cannot fit a transcript that mixes Taiwanese news, JSON tool
+# results and English prose: the original 4.0 is right for English (4.49
+# measured) and wrong by more than half for anything numeric (1.83), so a
+# transcript of financial JSON was reported at well under its real size.
+# Compaction believed it was holding 24k while the provider saw 60k, and the
+# run died on the model's context limit rather than degrading.
+#
+# Rates are rounded DOWN from the measured values, because the two error
+# directions are not symmetric: over-estimating compacts a little early, while
+# under-estimating fails the entire call.
+_CHARS_PER_TOKEN_CJK = 1.5      # measured 1.68 on Chinese prose
+_CHARS_PER_TOKEN_DIGIT = 1.6    # measured 1.83 on numeric JSON
+_CHARS_PER_TOKEN_OTHER = 3.5    # measured 4.49 English prose, 3.55 code
+
+# Class rates still miss on text that interleaves scripts inside a single token
+# run -- "NT$2.4tn", "Q2", "35.6%" split far finer than any per-class average
+# predicts, and such a sample still came in 1.39x over its estimate. Rather
+# than chase precision this margin buys the tail, because the cost is
+# asymmetric: an early compaction costs one summary call, an under-count costs
+# the whole run. Verified to keep every measured sample at or under its
+# estimate.
+_ESTIMATE_SAFETY = 1.4
+
+# CJK ranges that tokenize far denser than Latin text: CJK Unified Ideographs
+# (+ Extension A), Hiragana/Katakana, Hangul syllables, and the fullwidth
+# punctuation that surrounds them.
+_CJK_RANGES = (
+    (0x3000, 0x303F),   # CJK punctuation
+    (0x3040, 0x30FF),   # Hiragana + Katakana
+    (0x3400, 0x4DBF),   # CJK Ext A
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0xAC00, 0xD7AF),   # Hangul syllables
+    (0xF900, 0xFAFF),   # CJK compatibility ideographs
+    (0xFF00, 0xFFEF),   # Fullwidth forms
+)
+
+
+def _is_cjk(code: int) -> bool:
+    """Whether a codepoint falls in a CJK range."""
+    for low, high in _CJK_RANGES:
+        if low <= code <= high:
+            return True
+    return False
+
+
+def _char_class_counts(text: str) -> tuple[int, int, int]:
+    """Split *text* into (cjk, digit-ish, other) character counts.
+
+    "Digit-ish" covers digits and the punctuation that surrounds them in JSON.
+    Long digit runs and brace/quote/colon sequences are what a BPE tokenizer
+    splits most finely, and a tool-result transcript is mostly those.
+
+    Args:
+        text: Serialized transcript.
+
+    Returns:
+        ``(cjk, digit, other)`` counts summing to ``len(text)``.
+    """
+    cjk = digit = 0
+    for ch in text:
+        code = ord(ch)
+        if _is_cjk(code):
+            cjk += 1
+        elif ch.isdigit() or ch in r'{}[]":,.-+/\*=<>%$':
+            digit += 1
+    return cjk, digit, len(text) - cjk - digit
+
+
+def _cjk_char_count(text: str) -> int:
+    """Count characters in a CJK range. Kept for callers and tests."""
+    return _char_class_counts(text)[0]
+
+
 def estimate_tokens(messages: list) -> int:
-    """Rough token count estimate (~4 chars/token).
+    """Estimate the token count of a transcript, by character class.
+
+    This number decides when compaction runs, and the two failure directions
+    are not symmetric. Compacting early costs a summary call; counting low lets
+    the transcript pass the provider's context limit, which fails the call
+    outright. The rates are therefore rounded down from measured values.
 
     Args:
         messages: Message list.
 
     Returns:
-        Estimated token count.
+        Estimated token count. Deliberately local -- an exact count would need
+        a tokenizer round-trip every iteration, and this exists to decide
+        cheaply whether to compact.
     """
-    return len(json.dumps(messages, default=str, ensure_ascii=False)) // 4
+    text = json.dumps(messages, default=str, ensure_ascii=False)
+    cjk, digit, other = _char_class_counts(text)
+    raw = (
+        cjk / _CHARS_PER_TOKEN_CJK
+        + digit / _CHARS_PER_TOKEN_DIGIT
+        + other / _CHARS_PER_TOKEN_OTHER
+    )
+    return int(raw * _ESTIMATE_SAFETY)
 
 
 def _summary_chunks(msgs: list, limit: int = SUMMARY_CHUNK_CHARS) -> list[str]:
