@@ -863,3 +863,58 @@ class TestTaiwanFundamentalsAndNews:
         from src.tools.financial_statements_tool import _FINMIND_DATASET
 
         assert _FINMIND_DATASET[statement] == dataset
+
+
+class TestToolAllowlist:
+    """Every tool schema is re-sent on every LLM call, so the registry is a
+    fixed per-iteration cost, not a one-off. 107 tools measure 34,631 tokens
+    against the served tokenizer; on a 65,536-token model that is over half the
+    window spent before the transcript exists, and it is why a run failed with
+    "at least 65537 input tokens" while compaction was correctly holding
+    messages inside its 24k budget.
+    """
+
+    def test_unset_offers_every_tool(self, monkeypatch) -> None:
+        """The default must stay unchanged: an allowlist is opt-in."""
+        import src.tools as T
+        from src.config.accessor import reset_env_config
+
+        monkeypatch.delenv("VIBE_TRADING_ENABLED_TOOLS", raising=False)
+        reset_env_config()
+        assert T._enabled_tool_names() == []
+        reg = T.build_registry()
+        assert len(reg.get_definitions()) > 50
+
+    def test_allowlist_narrows_the_registry(self, monkeypatch) -> None:
+        import src.tools as T
+        from src.config.accessor import reset_env_config
+
+        wanted = ["get_market_data", "backtest", "write_file"]
+        monkeypatch.setenv("VIBE_TRADING_ENABLED_TOOLS", ",".join(wanted))
+        reset_env_config()
+        reg = T.build_registry()
+        reset_env_config()
+        assert sorted(reg._tools) == sorted(wanted)
+
+    def test_whitespace_and_blanks_are_tolerated(self, monkeypatch) -> None:
+        """A hand-edited .env line wraps and picks up spaces."""
+        import src.tools as T
+        from src.config.accessor import reset_env_config
+
+        monkeypatch.setenv("VIBE_TRADING_ENABLED_TOOLS", " backtest , ,write_file ")
+        reset_env_config()
+        names = T._enabled_tool_names()
+        reset_env_config()
+        assert names == ["backtest", "write_file"]
+
+    def test_unknown_name_is_dropped_not_fatal(self, monkeypatch) -> None:
+        """A typo must not take the whole registry down with it; the drop is
+        logged so the cause is findable."""
+        import src.tools as T
+        from src.config.accessor import reset_env_config
+
+        monkeypatch.setenv("VIBE_TRADING_ENABLED_TOOLS", "backtest,no_such_tool")
+        reset_env_config()
+        reg = T.build_registry()
+        reset_env_config()
+        assert sorted(reg._tools) == ["backtest"]

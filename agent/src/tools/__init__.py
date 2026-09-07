@@ -272,7 +272,55 @@ def build_registry(
                 if warn_callback is not None:
                     warn_callback(skip_msg)
 
-    return registry
+    return _apply_enabled_tools(registry, include_shell_tools=include_shell_tools)
+
+
+def _enabled_tool_names() -> list[str]:
+    """Read the operator's tool allowlist, or [] when unset.
+
+    Returns:
+        Tool names from ``VIBE_TRADING_ENABLED_TOOLS``, comma-separated.
+    """
+    try:
+        from src.config.accessor import get_env_config
+
+        raw = get_env_config().agent_tuning.vibe_trading_enabled_tools
+    except Exception:  # noqa: BLE001 -- a config read must not break tool discovery
+        return []
+    return [n.strip() for n in str(raw or "").split(",") if n.strip()]
+
+
+def _apply_enabled_tools(
+    registry: "ToolRegistry", *, include_shell_tools: bool
+) -> "ToolRegistry":
+    """Narrow *registry* to the operator's allowlist, if one is configured.
+
+    Every tool schema is re-sent on every LLM call, so the full registry is a
+    fixed cost paid once per iteration: 107 tools measure 34,631 tokens against
+    a served Qwen tokenizer. On a 65,536-token model that is over half the
+    window spent before the transcript is added, which is how a run failed with
+    "your prompt contains at least 65537 input tokens" while compaction was
+    correctly holding messages at its 24k budget -- the budget could not
+    succeed, because the fixed cost exceeded it.
+
+    Unset, nothing changes and every discovered tool is offered.
+
+    Args:
+        registry: The fully discovered registry.
+        include_shell_tools: Passed through for the drop-log message only.
+
+    Returns:
+        The same registry when no allowlist is set, otherwise a narrowed one.
+    """
+    names = _enabled_tool_names()
+    if not names:
+        return registry
+    filtered = _filter_registry(registry, names, include_shell_tools=include_shell_tools)
+    logger.info(
+        "VIBE_TRADING_ENABLED_TOOLS narrowed the registry from %d to %d tool(s)",
+        len(registry.get_definitions()), len(filtered.get_definitions()),
+    )
+    return filtered
 
 
 def build_filtered_registry(tool_names: list[str], *, include_shell_tools: bool = False) -> ToolRegistry:

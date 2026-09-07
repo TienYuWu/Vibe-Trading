@@ -176,7 +176,17 @@ VIBE_TRADING_LLM_TIMEOUT_SECONDS=900   # default 300
 TOKEN_THRESHOLD=24000                  # default 40000
 VIBE_TRADING_SSE_TIMEOUT=900           # default 90
 VIBE_TRADING_RUN_STALL_TIMEOUT_SECONDS=3600   # default 1800
+VIBE_TRADING_ENABLED_TOOLS=search_symbol,get_market_data,get_stock_news,get_financial_statements,get_stock_profile,technical_indicators,web_search,read_url,read_document,backtest,scaffold_signal_engine,generate_backtest_config,write_file,read_file,edit_file,alpha_zoo,alpha_bench,factor_analysis,portfolio_risk_xray,financial_rigor,quantlib_call,report_audit,load_skill,remember,compact,check_background
 ```
+
+The tool allowlist matters more than every timeout above it. Each schema is
+re-sent on **every** LLM call, so the registry is a per-iteration fixed cost,
+not a one-off: all 107 tools measure 34,631 tokens against the served
+tokenizer. On a 65,536-token model that is over half the window gone before the
+transcript is added, and it is why a run failed with `at least 65537 input
+tokens` while compaction was correctly holding messages at 24k -- the budget
+could not succeed, because the fixed cost exceeded it. The 26-tool set above
+measures 7,080 tokens: 80% less, and 27k more room for the conversation.
 
 The default 300s bounds the auto-compact summary call, not just a ReAct step. A
 27B writing a long structured summary overran it every time, so every

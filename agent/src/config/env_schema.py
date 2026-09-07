@@ -387,6 +387,12 @@ class AgentTuningConfig(_EnvBase):
     vibe_trading_answer_language: str = Field(
         alias="VIBE_TRADING_ANSWER_LANGUAGE", default=""
     )
+    # Comma-separated tool allowlist. Empty offers every discovered tool, which
+    # is the default. Every schema is re-sent on each LLM call, so the full set
+    # is a per-iteration fixed cost -- 107 tools measure ~34.6k tokens.
+    vibe_trading_enabled_tools: str = Field(
+        alias="VIBE_TRADING_ENABLED_TOOLS", default=""
+    )
     vt_heartbeat_interval_s: float = Field(alias="VT_HEARTBEAT_INTERVAL_S", default=3.0)
     vt_reasoning_delta_min_interval_s: float = Field(
         alias="VT_REASONING_DELTA_MIN_INTERVAL_S", default=1.0,
