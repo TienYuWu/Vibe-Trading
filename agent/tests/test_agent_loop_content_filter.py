@@ -237,6 +237,9 @@ def test_single_empty_response_recovers_with_nudge(
         and "empty" in str(m.get("content", "")).casefold()
     ]
     assert len(system_msgs) == 1
+    # vLLM serving Qwen answers a mid-conversation system message with
+    # 400 "System message must be at the beginning."
+    assert_system_messages_only_lead(llm.messages_history)
 
 def test_auto_compact_summary_hard_deadline(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

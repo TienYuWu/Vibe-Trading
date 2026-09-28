@@ -1555,7 +1555,7 @@ class AgentLoop:
                                 "iter": current_iter,
                             }
                         )
-                        messages.append({"role": "system", "content": pending_directive})
+                        messages.append({"role": "user", "content": f"<system>{pending_directive}</system>"})
 
                 # Streaming output + collect thinking text
                 thinking_chunks: List[str] = []
@@ -1881,11 +1881,13 @@ class AgentLoop:
                         consecutive_empty_responses += 1
                         messages.append(
                             {
-                                "role": "system",
+                                "role": "user",
                                 "content": (
+                                    "<system>"
                                     "[SYSTEM] Your previous response was empty (no text, no tool "
                                     "calls). Respond again with either your next tool call or "
                                     "your final plain-text answer."
+                                    "</system>"
                                 ),
                             }
                         )
@@ -1909,11 +1911,13 @@ class AgentLoop:
                         )
                         messages.append(
                             {
-                                "role": "system",
+                                "role": "user",
                                 "content": (
+                                    "<system>"
                                     "[SYSTEM] Your previous response was not released: it contained "
                                     "tool-call syntax even though tool calling is unavailable now. "
                                     "Provide the final answer as plain prose only, with no XML/DSML tags."
+                                    "</system>"
                                 ),
                             }
                         )
