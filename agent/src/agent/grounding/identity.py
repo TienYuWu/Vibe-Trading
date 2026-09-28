@@ -111,6 +111,9 @@ _JOINED_CRYPTO_RE = re.compile(
 _CANONICAL_SYMBOL_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"\d{3,6}\.(?:SH|SZ|BJ|SS|HK|KS|KQ)|"
+    # Taiwan: TWSE (2330.TW) / TPEx (6488.TWO); ETF codes carry a letter
+    # (00632R.TW), same class as _market_hooks.
+    r"[0-9][0-9A-Z]{3,5}\.(?:TWO|TW)|"
     # Futu writes the venue as a PREFIX (HK.00700 / SH.600519 / US.AAPL). The
     # suffix branch above cannot see it, so a user who pasted a connector code
     # got no identity lock at all and every market tool answered
@@ -257,6 +260,8 @@ def _infer_venue(symbol: str) -> str | None:
         ".BA": "buenos_aires",
         ".L": "lse",
         ".VN": "hose",
+        ".TW": "twse",
+        ".TWO": "tpex",
     }
     for suffix, venue in suffixes.items():
         if upper.endswith(suffix):
@@ -326,6 +331,8 @@ def _infer_currency(symbol: str) -> str | None:
         # GBP, the same contract as the backtest's _MARKET_CURRENCY.
         ".L": "GBP",
         ".VN": "VND",
+        ".TW": "TWD",
+        ".TWO": "TWD",
     }
     for suffix, currency in suffixes.items():
         if upper.endswith(suffix):

@@ -25,6 +25,7 @@ CANARY_SYMBOLS = {
     "binance": "BTC-USDT",
     "ccxt": "BTC-USDT",
     "eastmoney": "601398.SH",
+    "finmind": "2330.TW",
     "mootdx": "601398.SH",
     "nobitex": "BTC-IRT",
     "okx": "BTC-USDT",

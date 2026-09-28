@@ -23,6 +23,7 @@ _SAMPLES: dict[str, tuple[str, str, str]] = {
     "hk_equity": ("00700.HK", "0700.HK", "hk"),
     "india_equity": ("RELIANCE.NS", "RELIANCE.NS", "in"),
     "kr_equity": ("005930.KS", "005930.KS", "kr"),
+    "tw_equity": ("2330.TW", "2330.TW", "tw"),
     "ca_equity": ("TD.TO", "TD.TO", "ca"),
     "ar_equity": ("GGAL.BA", "GGAL.BA", "ar"),
     "uk_equity": ("VOD.L", "VOD.L", "uk"),
@@ -30,7 +31,8 @@ _SAMPLES: dict[str, tuple[str, str, str]] = {
 }
 
 # Crypto has a currency row but no listing suffix: its pairs carry the quote.
-_NOT_A_LISTING_MARKET = {"crypto"}
+# TAIFEX products (TXF, MXF) are contracts, not listings, and Yahoo has none.
+_NOT_A_LISTING_MARKET = {"crypto", "tw_futures"}
 
 
 def test_every_currency_market_has_a_sample() -> None:
