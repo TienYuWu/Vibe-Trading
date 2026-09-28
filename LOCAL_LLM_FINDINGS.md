@@ -174,6 +174,65 @@ DEEPSEEK_API_KEY=sk-xxx
 
 ---
 
+## 2026-09-28 重新分析：3.5 萬 output token 大多是被退回的草稿
+
+上面把慢歸因到 decode 速度，這沒錯，但沒回答「為什麼一個問題要產生 3.5 萬 token」。
+重讀 session `a9d9a142b994` 的 `trace.jsonl`（9 次「2330的前景」／「台指期的趨勢」）：
+
+| run | output tokens | 被 grounding 退回的草稿 | 其中退回草稿佔 |
+|---|---|---|---|
+| 09-05 14:17 | 43,096 | 4 次（it60–63） | 41,384（96%） |
+| 09-07 01:30 | 34,864 | 4 次（it76–79） | 34,001（97.5%） |
+
+整個 session 共 16 次 `answer_rejected`。另有兩個 run 以 `maximum context length` 400 結束：
+每份被退回的草稿（最長 4.3 萬字元）連同 gate 的回饋都塞回 context，迴圈把 65,536 撐爆。
+
+### 根因：思考內容混進了答案
+
+vLLM 沒開 `--reasoning-parser`，所以 Qwen 的推理過程留在 `content` 裡（it61 的草稿裡找得到 `</think>`）。
+Grounding gate 核對的是 `content`，所以連推理文字一起核對：
+
+- `"June 23 high 2535"` → 把日期 23 當成價格，跟 OHLC 範圍 1145–2535 比 → 衝突
+- `"Draft 2: 7/1 close"` → 2 與 1 被當成價格
+- 模型在下一輪的推理裡檢討「為什麼 23 被擋」，又寫出更多數字 → 再被擋
+
+it78 的草稿已經在逐一列舉 `13 (contains 1), 04 (contains 4) …`，這是死亡螺旋，不是研究。
+單次 22,063 token ÷ 23 tok/s ≈ 16 分鐘，**單一呼叫就超過 900 秒的 LLM 逾時**，觸發重試，重試再走一遍。
+
+App 端沒有任何 `<think>` 處理（`grep "think>" agent/src` 為空）；
+推理只要走 `reasoning_content` 欄位，`providers/llm.py` 就會把它和答案分開，也不會回送（`send_reasoning_content=False`）。
+
+**預期：** 開 `--reasoning-parser qwen3` 後，gate 只核對真正的答案，退回次數應接近 0，
+output 砍到剩「一份草稿 + 推理」，研究型對話可能從 25–30 分鐘降到 5 分鐘以內。
+上面「繼續調的天花板」表格是在沒發現這點的前提下算的，要重估。
+
+### 本機實驗計畫（RTX 5090 32GB，GPU 有空時）
+
+27B BF16（54GB）與 FP8（約 27GB + KV cache）都塞不進 32GB，要用 4-bit（AWQ / GPTQ，或 Blackwell 原生 NVFP4，先在 HF 確認有無現成量化版），
+權重約 14–15GB。5090 頻寬約 1.8 TB/s，4-bit decode 的理論上限約 120 tok/s，是 A100 BF16 的數倍。
+
+```bash
+docker run --gpus all -p 8000:8000 -v hf_cache:/root/.cache/huggingface vllm/vllm-openai:latest \
+  --model <Qwen3.8-27B 的 4-bit 版> \
+  --max-model-len 65536 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+  --reasoning-parser qwen3 \
+  --gpu-memory-utilization 0.90
+```
+
+同一個 prompt（`2330的前景`），每組跑 3 次：
+
+| 組 | 變因 |
+|---|---|
+| A | 不加 `--reasoning-parser`（重現基準） |
+| B | 加 `--reasoning-parser qwen3` |
+| C | B + `chat_template_kwargs: {enable_thinking: false}` |
+
+量測：`llm_usage.json` 的 `totals.output_tokens`、`trace.jsonl` 的 `answer_rejected` 次數與 `end.degraded`、總耗時。
+先做 A/B 就能驗證根因；A 組若在 5090 上仍出現退回迴圈，B 組沒有，就定案。
+
+---
+
 ## 模型行為觀察
 
 正面：
