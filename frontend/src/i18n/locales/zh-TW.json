@@ -2,6 +2,11 @@
   "app": {
     "version": "v0.1.15"
   },
+  "charts": {
+    "noPriceData": "這個標的還沒有價格資料",
+    "noCorrelationData": "至少選兩個標的才能比較",
+    "noEquityData": "還沒有淨值曲線——先跑一次回測"
+  },
   "layout": {
     "home": "首頁",
     "agent": "智慧體",
@@ -247,14 +252,19 @@
     "examples": {
       "crossMarketPortfolio": "三隻 A 股的部位配比",
       "crossMarketPortfolioDesc": "在 3 只 A 股之間分配資金，讓每隻承擔同等風險（風險平價），再與等權組合對比",
+      "crossMarketPortfolioPrompt": "用000001.SZ、600519.SH、000858.SZ構建風險平價組合，回測2024全年，與等權基準對比",
       "btcMacd": "A股 MACD 策略",
       "btcMacdDesc": "基於分鐘級資料的A股MACD策略回測",
+      "btcMacdPrompt": "用000001.SZ的5分鐘K線做MACD策略回測，快線12慢線26訊號線9，近30天",
       "usTechMaxDiv": "藍籌股分散配置",
       "usTechMaxDivDesc": "給 5 只藍籌分配權重，讓風險不壓在單隻股票上（最大分散化最佳化器）",
+      "usTechMaxDivPrompt": "回測600519.SH、000858.SZ、601318.SH、000001.SZ、600036.SH的最大分散化投資組合，2024全年",
       "multiFactorAlpha": "多因子 Alpha 模型",
       "multiFactorAlphaDesc": "在 300 只股票上合成 4 類選股訊號，按各自歷史預測準確度（IC）加權",
+      "multiFactorAlphaPrompt": "在滬深 300 成分股上利用動量、反轉、成交量和波動率構建多因子 Alpha 模型，進行 IC 加權因子合成，回測 2023-2024 年",
       "optionsGreeks": "期權風險指標（Greeks）分析",
       "optionsGreeksDesc": "給期權定價，並算出它對股價、時間、波動率的敏感度（Greeks：Delta/Gamma/Theta/Vega）",
+      "optionsGreeksPrompt": "利用 Black-Scholes 計算期權希臘字母：現貨=100，執行價=105，無風險利率=3%，波動率=25%，到期時間=90天，分析 Delta/Gamma/Theta/Vega",
       "valueCommittee": "四大師價值委員會",
       "valueCommitteeDesc": "巴菲特/芒格/段永平/李錄 四視角辯論一隻股票",
       "valueCommitteePrompt": "用 run_swarm 執行 value_investing_committee，分析騰訊（00700.HK）:巴菲特看護城河和價格、芒格做逆向、段永平看生意和人、李錄看十年確定性，主席綜合共識和矛盾",
@@ -269,44 +279,39 @@
       "valuationCheckPrompt": "用 financial_rigor 工具驗算貴州茅臺估值:股價 1500、EPS 68.6、每股淨資產 180，精確算 PE/PB/ROE，再做三情景估值（增速 12%/8%/0%，PE 22/18/14，3 年）",
       "investmentCommittee": "多空辯論：該買還是該賣",
       "investmentCommitteeDesc": "智慧體團隊辯論：多頭 vs 空頭，風險審查，投資經理決策",
+      "investmentCommitteePrompt": "[智慧體團隊模式] 使用 investment_committee 預設評估在當前市場環境下對 600519.SH 進行做多還是做空",
       "quantStrategyDesk": "量化策略工作臺",
       "quantStrategyDeskDesc": "篩選 → 因子研究 → 回測 → 風險審計流水線",
+      "quantStrategyDeskPrompt": "[智慧體團隊模式] 使用 quant_strategy_desk 預設在滬深 300 成分股中尋找並回測最佳動量策略",
       "earningsReport": "分析財報 PDF",
       "earningsReportDesc": "上傳 PDF 並詢問財務問題",
+      "earningsReportPrompt": "總結上傳財務報告中的核心財務指標、風險和展望",
       "macroResearch": "網路研究：宏觀經濟展望",
       "macroResearchDesc": "閱讀最新網路來源進行宏觀分析",
+      "macroResearchPrompt": "閱讀最新的央行貨幣政策報告，總結對 A 股市場的影響",
       "analyzeBrokerExport": "分析券商匯出資料",
       "analyzeBrokerExportDesc": "解析同花順/東財/富途/通用 CSV —— 持倉天數、勝率、盈虧比、小時分佈",
+      "analyzeBrokerExportPrompt": "分析我剛剛上傳的交易日誌 —— 包含持倉統計、勝率、核心標的以及小時分佈的完整畫像",
       "diagnoseBehavior": "診斷行為偏差",
       "diagnoseBehaviorDesc": "處置效應、過度交易、追漲動量、錨定效應 —— 嚴重程度 + 數值證據",
+      "diagnoseBehaviorPrompt": "對我的交易日誌執行 4 項行為診斷（處置效應、過度交易、追漲、錨定），並告訴我哪種偏差最損害我的盈虧",
       "checkConnector": "檢查已選聯結器",
       "checkConnectorDesc": "列出聯結器配置並驗證當前選擇",
+      "checkConnectorPrompt": "列出我的交易聯結器配置，顯示哪一個被選中，然後檢查該被選中的聯結器。如果未就緒，請明確告訴我缺少什麼設定步驟。不要下單或修改訂單。",
       "analyzePortfolio": "分析聯結器投資組合",
       "analyzePortfolioDesc": "從已選聯結器讀取賬戶摘要和持倉",
+      "analyzePortfolioPrompt": "使用選定的交易聯結器配置來總結我的賬戶、持倉、集中度、現金和組合風險。不要下單或修改訂單。",
       "quoteTrend": "報價與趨勢",
       "quoteTrendDesc": "透過已選聯結器獲取報價和近 30 日日線資料",
+      "quoteTrendPrompt": "使用選定的交易聯結器獲取 600519.SH 的報價和 30 日日線資料，然後總結當前報價與近期趨勢的對比。保持只讀。",
       "trainShadow": "從日誌訓練影子賬戶",
       "trainShadowDesc": "從券商 CSV 提取策略規則並持久化影子賬戶配置",
+      "trainShadowPrompt": "從我剛剛上傳的交易日誌中訓練我的影子賬戶 —— 展示提取的規則並確認它們符合我的交易習慣",
       "shadowDelta": "我少賺了多少？",
       "shadowDeltaDesc": "回測影子策略並與實際盈虧進行歸因分析",
+      "shadowDeltaPrompt": "執行過去 90 天的影子回測，並細化分析我的實際盈虧與影子賬戶發生分歧的地方（違反規則、過早退出、錯過訊號）",
       "shadowReport": "生成影子報告",
       "shadowReportDesc": "可分享的 8 部分報告：賬戶淨值曲線、風險調整後收益，以及每筆盈虧的來源拆解",
-      "crossMarketPortfolioPrompt": "用000001.SZ、600519.SH、000858.SZ構建風險平價組合，回測2024全年，與等權基準對比",
-      "btcMacdPrompt": "用000001.SZ的5分鐘K線做MACD策略回測，快線12慢線26訊號線9，近30天",
-      "usTechMaxDivPrompt": "回測600519.SH、000858.SZ、601318.SH、000001.SZ、600036.SH的最大分散化投資組合，2024全年",
-      "multiFactorAlphaPrompt": "在滬深 300 成分股上利用動量、反轉、成交量和波動率構建多因子 Alpha 模型，進行 IC 加權因子合成，回測 2023-2024 年",
-      "optionsGreeksPrompt": "利用 Black-Scholes 計算期權希臘字母：現貨=100，執行價=105，無風險利率=3%，波動率=25%，到期時間=90天，分析 Delta/Gamma/Theta/Vega",
-      "investmentCommitteePrompt": "[智慧體團隊模式] 使用 investment_committee 預設評估在當前市場環境下對 600519.SH 進行做多還是做空",
-      "quantStrategyDeskPrompt": "[智慧體團隊模式] 使用 quant_strategy_desk 預設在滬深 300 成分股中尋找並回測最佳動量策略",
-      "earningsReportPrompt": "總結上傳財務報告中的核心財務指標、風險和展望",
-      "macroResearchPrompt": "閱讀最新的央行貨幣政策報告，總結對 A 股市場的影響",
-      "analyzeBrokerExportPrompt": "分析我剛剛上傳的交易日誌 —— 包含持倉統計、勝率、核心標的以及小時分佈的完整畫像",
-      "diagnoseBehaviorPrompt": "對我的交易日誌執行 4 項行為診斷（處置效應、過度交易、追漲、錨定），並告訴我哪種偏差最損害我的盈虧",
-      "checkConnectorPrompt": "列出我的交易聯結器配置，顯示哪一個被選中，然後檢查該被選中的聯結器。如果未就緒，請明確告訴我缺少什麼設定步驟。不要下單或修改訂單。",
-      "analyzePortfolioPrompt": "使用選定的交易聯結器配置來總結我的賬戶、持倉、集中度、現金和組合風險。不要下單或修改訂單。",
-      "quoteTrendPrompt": "使用選定的交易聯結器獲取 600519.SH 的報價和 30 日日線資料，然後總結當前報價與近期趨勢的對比。保持只讀。",
-      "trainShadowPrompt": "從我剛剛上傳的交易日誌中訓練我的影子賬戶 —— 展示提取的規則並確認它們符合我的交易習慣",
-      "shadowDeltaPrompt": "執行過去 90 天的影子回測，並細化分析我的實際盈虧與影子賬戶發生分歧的地方（違反規則、過早退出、錯過訊號）",
       "shadowReportPrompt": "渲染影子報告並向我提供 URL —— 以你與影子賬戶的盈虧差距（Delta）為主導"
     },
     "taskSubtitle": "問一隻股票、一個策略，或者你的持倉——我會自己取資料、跑計算，並把每一步擺給你看。",
@@ -349,6 +354,13 @@
     "maxRetries": "最大重試次數",
     "reasoningEffort": "推理強度",
     "providerDefault": "提供商預設",
+    "off": "關閉",
+    "reasoningEffortNone": "無（顯式）",
+    "reasoningEffortLow": "低",
+    "reasoningEffortMedium": "中",
+    "reasoningEffortHigh": "高",
+    "reasoningEffortMax": "最大",
+    "reasoningEffortDesc": "控制支援該功能的模型所使用的推理深度。強度越高，複雜分析可能更充分，但耗時也可能更長；不支援的提供商可能會忽略此設定。選擇「無（顯式）」會顯式傳送該欄位並關閉推理——部分 OpenAI 模型需要這樣才能呼叫工具。",
     "useDefaultModel": "使用預設模型",
     "useDefaultUrl": "使用預設 URL",
     "dataSourcesDesc": "配置回測引擎的外部資料來源。",
@@ -365,13 +377,6 @@
     "noProjectLoader": "無專案載入器",
     "pythonPackageInstalled": "Python 包已安裝",
     "pythonPackageNotInstalled": "Python 包未安裝",
-    "off": "關閉",
-    "reasoningEffortNone": "無（顯式）",
-    "reasoningEffortLow": "低",
-    "reasoningEffortMedium": "中",
-    "reasoningEffortHigh": "高",
-    "reasoningEffortMax": "最大",
-    "reasoningEffortDesc": "控制支援該功能的模型所使用的推理深度。強度越高，複雜分析可能更充分，但耗時也可能更長；不支援的提供商可能會忽略此設定。選擇「無（顯式）」會顯式傳送該欄位並關閉推理——部分 OpenAI 模型需要這樣才能呼叫工具。",
     "localApiAccess": "本地 API 訪問",
     "localApiAccessDesc": "對遠端或專用 Web UI 部署，請在瀏覽器中輸入一次伺服器 API 金鑰。本地主機（localhost）使用可保持為空。",
     "serverApiKey": "伺服器 API 金鑰",
@@ -416,7 +421,346 @@
       "stoppedToast": "IM 通道已停止",
       "refreshFailed": "重新整理 IM 通道失敗",
       "startFailed": "啟動 IM 通道失敗",
-      "stopFailed": "停止 IM 通道失敗"
+      "stopFailed": "停止 IM 通道失敗",
+      "config": {
+        "toggleConfig": "Configure {{name}}",
+        "keepCurrent": "Keep current ({{masked}})",
+        "secretNotSet": "Not set",
+        "clearSecret": "Clear",
+        "required": "Required",
+        "listPlaceholder": "Type a value and press Enter",
+        "removeValue": "Remove {{value}}",
+        "save": "Save configuration",
+        "hotApply": "Saving applies immediately — no restart needed.",
+        "saved": "Channel configuration saved",
+        "saveFailed": "Failed to save the channel configuration: {{message}}",
+        "test": "Test connection",
+        "testing": "Testing…",
+        "testOk": "Connection verified",
+        "testFailed": "Connection test failed: {{message}}",
+        "testCodeOk": "The provider accepted these credentials.",
+        "testCodeInvalidCredentials": "The provider rejected these credentials.",
+        "testCodeNetwork": "The provider could not be reached.",
+        "testCodeUnsupported": "This channel does not support connection tests.",
+        "testedSavedConfig": "Tested the saved configuration.",
+        "testedDraftConfig": "Tested the values currently in the form (not saved yet).",
+        "enable": "Enable channel",
+        "enableHint": "Disabling keeps the stored credentials — you can re-enable at any time.",
+        "enabledToast": "Channel enabled",
+        "disabledToast": "Channel disabled",
+        "enableFailed": "Failed to enable the channel: {{message}}",
+        "disableFailed": "Failed to disable the channel: {{message}}",
+        "enableRejected": "The provider rejected these credentials, so the channel was not enabled.",
+        "enableRejectedDetail": "Provider response: {{detail}}",
+        "enableAnyway": "Enable anyway",
+        "enableAnywayHint": "Enabling anyway skips the credential check — the channel may fail to connect.",
+        "notWritable": "Channel configuration is stored in a YAML file ({{path}}), which the web UI cannot edit. Edit that file directly to change credentials.",
+        "notWritableChip": "Read-only (YAML)",
+        "sdkMissing": "Runtime SDK not installed — {{hint}}",
+        "sdkMissingNoHint": "Runtime SDK not installed; the channel can be configured but may not start.",
+        "noFields": "This channel has no configurable fields.",
+        "loadFailed": "Could not load channel configuration."
+      },
+      "fields": {
+        "dingtalk": {
+          "client_id": {
+            "label": "Client ID (AppKey)",
+            "help": "The app's AppKey from the Credentials page of the DingTalk developer console."
+          },
+          "client_secret": {
+            "label": "Client Secret (AppSecret)",
+            "help": "The app's AppSecret. Stored server-side and never sent back to the browser."
+          },
+          "allow_from": {
+            "label": "Allowed senders",
+            "help": "Optional allowlist of DingTalk sender IDs that may talk to the agent (\"*\" allows everyone). Unpaired senders receive a pairing code in a direct message."
+          },
+          "allow_remote_media_redirects": {
+            "label": "Allow remote media redirects",
+            "help": "Follow provider redirects when downloading message media. Off by default."
+          },
+          "remote_media_redirect_allowed_hosts": {
+            "label": "Allowed redirect hosts",
+            "help": "Hosts allowed when remote media redirects are enabled. An empty list blocks every cross-host redirect."
+          },
+          "group_user_isolation": {
+            "label": "Per-user group sessions",
+            "help": "Give each member of a group chat their own agent session instead of sharing one."
+          },
+          "force_ipv4": {
+            "label": "Force IPv4",
+            "help": "Bind DingTalk API calls to IPv4. Useful when the app's egress-IP whitelist holds a stable IPv4 address while the IPv6 prefix keeps rotating."
+          }
+        },
+        "qq": {
+          "app_id": {
+            "label": "AppID",
+            "help": "The bot's AppID from the QQ Open Platform (q.qq.com) app settings."
+          },
+          "secret": {
+            "label": "AppSecret",
+            "help": "The bot's AppSecret. Stored server-side and never sent back to the browser."
+          },
+          "allow_from": {
+            "label": "Allowed senders",
+            "help": "Optional allowlist of QQ sender openids that may talk to the agent (\"*\" allows everyone). Unpaired senders receive a pairing code in a direct message."
+          },
+          "msg_format": {
+            "label": "Message format",
+            "help": "Reply format: plain or markdown."
+          },
+          "ack_message": {
+            "label": "Ack message",
+            "help": "Immediate acknowledgement sent when a message arrives. Leave empty to disable."
+          },
+          "media_dir": {
+            "label": "Media directory",
+            "help": "Where inbound attachments are saved. Empty uses ~/.vibe-trading/media/qq."
+          },
+          "download_chunk_size": {
+            "label": "Download chunk size",
+            "help": "Bytes per chunk when downloading attachments (default 262144)."
+          },
+          "download_max_bytes": {
+            "label": "Max download size (bytes)",
+            "help": "Safety cap for a single attachment download (default 209715200 = 200 MB)."
+          }
+        },
+        "email": {
+          "consent_granted": {
+            "label": "Consent granted",
+            "help": "Master permission switch. The channel reads and sends email only after you explicitly grant consent here."
+          },
+          "imap_host": {
+            "label": "IMAP host",
+            "help": "Inbound mail server host, e.g. imap.gmail.com. Incoming mail is polled from this server."
+          },
+          "imap_port": {
+            "label": "IMAP port",
+            "help": "Inbound port (default 993 with SSL)."
+          },
+          "imap_username": {
+            "label": "IMAP username",
+            "help": "Mailbox account used to sign in over IMAP, usually the full email address."
+          },
+          "imap_password": {
+            "label": "IMAP password",
+            "help": "Mailbox password or app password for IMAP. Stored server-side and never sent back to the browser."
+          },
+          "imap_mailbox": {
+            "label": "IMAP mailbox",
+            "help": "Mailbox folder polled for new mail (default INBOX)."
+          },
+          "imap_use_ssl": {
+            "label": "IMAP SSL",
+            "help": "Connect to IMAP over SSL (on by default; required for port 993)."
+          },
+          "imap_use_tls": {
+            "label": "IMAP STARTTLS",
+            "help": "When IMAP SSL is off, upgrade the connection with STARTTLS before logging in (on by default; typical for port 143). Turn it off only for a server that offers no TLS on a network you trust — the password is then sent in plain text."
+          },
+          "smtp_host": {
+            "label": "SMTP host",
+            "help": "Outbound mail server host, e.g. smtp.gmail.com. Replies are sent through this server."
+          },
+          "smtp_port": {
+            "label": "SMTP port",
+            "help": "Outbound port (default 587 with STARTTLS; use 465 for implicit SSL)."
+          },
+          "smtp_username": {
+            "label": "SMTP username",
+            "help": "Account used to authenticate with the SMTP server, usually the full email address."
+          },
+          "smtp_password": {
+            "label": "SMTP password",
+            "help": "Password or app password for SMTP. Stored server-side and never sent back to the browser."
+          },
+          "smtp_use_tls": {
+            "label": "SMTP STARTTLS",
+            "help": "Upgrade the SMTP connection with STARTTLS (on by default; typical for port 587). In practice this is mutually exclusive with SMTP SSL."
+          },
+          "smtp_use_ssl": {
+            "label": "SMTP SSL",
+            "help": "Connect to SMTP over implicit TLS, e.g. port 465 (off by default). In practice this is mutually exclusive with STARTTLS."
+          },
+          "verify_tls": {
+            "label": "Verify TLS certificate",
+            "help": "Verify the mail server's TLS certificate and hostname (recommended). Disable only for self-signed or internal-CA servers."
+          },
+          "from_address": {
+            "label": "From address",
+            "help": "Address replies are sent from. Empty reuses the SMTP username."
+          },
+          "auto_reply_enabled": {
+            "label": "Automatic replies",
+            "help": "Reply automatically to inbound email. Proactive sends started by the agent are unaffected."
+          },
+          "poll_interval_seconds": {
+            "label": "Poll interval (seconds)",
+            "help": "How often the IMAP mailbox is checked for new mail (default 30, floor 5)."
+          },
+          "mark_seen": {
+            "label": "Mark as seen",
+            "help": "Mark processed emails as read in the mailbox."
+          },
+          "post_action": {
+            "label": "After processing",
+            "help": "What happens to processed emails: delete, move them to another mailbox, or leave empty to keep them."
+          },
+          "post_action_move_mailbox": {
+            "label": "Move to mailbox",
+            "help": "Target mailbox used when After processing is set to move."
+          },
+          "post_action_expunge": {
+            "label": "Expunge after delete",
+            "help": "Permanently expunge deleted emails instead of leaving them flagged in the mailbox."
+          },
+          "post_action_ignore_skipped": {
+            "label": "Skip self and filtered mail",
+            "help": "Leave skipped emails (your own messages and senders filtered by the allowlist) untouched by the post-action (on by default)."
+          },
+          "max_body_chars": {
+            "label": "Max body chars",
+            "help": "Truncate each email body to this many characters (default 12000)."
+          },
+          "subject_prefix": {
+            "label": "Reply subject prefix",
+            "help": "Prefix added to reply subjects (default \"Re: \")."
+          },
+          "allow_from": {
+            "label": "Allowed senders",
+            "help": "Optional allowlist of email addresses that may talk to the agent (\"*\" allows everyone). Unpaired senders receive a pairing code in a reply."
+          },
+          "verify_dkim": {
+            "label": "Verify DKIM",
+            "help": "Require an Authentication-Results header with dkim=pass. Disabling both DKIM and SPF accepts spoofed From headers."
+          },
+          "verify_spf": {
+            "label": "Verify SPF",
+            "help": "Require an Authentication-Results header with spf=pass. Disabling both DKIM and SPF accepts spoofed From headers."
+          },
+          "allowed_attachment_types": {
+            "label": "Allowed attachment types",
+            "help": "MIME allowlist for inbound attachments, e.g. application/pdf or image/*. Leave empty to disable attachments."
+          },
+          "max_attachment_size": {
+            "label": "Max attachment size (bytes)",
+            "help": "Largest single attachment accepted, in bytes (default 2000000 = 2 MB)."
+          },
+          "max_attachments_per_email": {
+            "label": "Max attachments per email",
+            "help": "How many attachments are accepted from one email (default 5)."
+          }
+        },
+        "websocket": {
+          "host": {
+            "label": "Bind host",
+            "help": "Local address the WebSocket server binds to (default 127.0.0.1, local-only). A wildcard host such as 0.0.0.0 or :: exposes the server on every interface and is rejected unless a token or token-issue secret is set."
+          },
+          "port": {
+            "label": "Bind port",
+            "help": "Local port the WebSocket server listens on (default 8765). Ignored when a Unix socket path is set."
+          },
+          "unix_socket_path": {
+            "label": "Unix socket path",
+            "help": "Optional absolute path. When set, the server listens on this Unix socket instead of the host and port."
+          },
+          "path": {
+            "label": "Upgrade path",
+            "help": "WebSocket upgrade path clients connect to (default /). Must start with \"/\"."
+          },
+          "token": {
+            "label": "Static token",
+            "help": "Shared secret checked as the token query parameter during the handshake. Stored server-side and never sent back to the browser."
+          },
+          "token_issue_path": {
+            "label": "Token issue path",
+            "help": "HTTP GET route that hands out short-lived one-time tokens as JSON. Must differ from the upgrade path."
+          },
+          "token_issue_secret": {
+            "label": "Token issue secret",
+            "help": "Bearer secret the token-issue route requires (Authorization: Bearer or X-Vibe-Trading-Auth). Stored server-side and never sent back to the browser."
+          },
+          "token_ttl_s": {
+            "label": "Issued token TTL (s)",
+            "help": "Lifetime of a token handed out by the token-issue route, in seconds (30-86400, default 300)."
+          },
+          "websocket_requires_token": {
+            "label": "Require token",
+            "help": "Reject handshakes that do not present a valid static or issued token (on by default)."
+          },
+          "allow_from": {
+            "label": "Allowed clients",
+            "help": "Optional allowlist of client IDs that may connect (\"*\" allows everyone, the default)."
+          },
+          "streaming": {
+            "label": "Stream output",
+            "help": "Stream model output deltas to connected clients as they are generated."
+          },
+          "max_message_bytes": {
+            "label": "Max message bytes",
+            "help": "Largest inbound frame accepted, in bytes (default 37748736; range 1024-41943040)."
+          },
+          "ping_interval_s": {
+            "label": "Ping interval (s)",
+            "help": "Seconds between keepalive pings (5-300, default 20)."
+          },
+          "ping_timeout_s": {
+            "label": "Ping timeout (s)",
+            "help": "Seconds to wait for a ping reply before dropping the connection (5-300, default 20)."
+          },
+          "ssl_certfile": {
+            "label": "TLS certificate path",
+            "help": "PEM certificate path on the server for WSS. Set both certificate and key, or neither; these are file paths on the server, not uploaded material."
+          },
+          "ssl_keyfile": {
+            "label": "TLS key path",
+            "help": "PEM private key path on the server for WSS. Set both certificate and key, or neither; these are file paths on the server, not uploaded material."
+          }
+        }
+      },
+      "guides": {
+        "dingtalk": {
+          "title": "DingTalk setup guide",
+          "intro": "DingTalk bots use Stream Mode, so no public callback URL is needed.",
+          "step1": "Create an app in the DingTalk developer console (open-dev.dingtalk.com).",
+          "step2": "Add the bot capability to the app and enable Stream Mode for it.",
+          "step3": "Copy the app's AppKey into Client ID and its AppSecret into Client Secret.",
+          "step4": "Publish the app so it is available to your organization.",
+          "step5": "Return here, click Test connection, then enable the channel.",
+          "docsLabel": "Open the DingTalk developer console"
+        },
+        "qq": {
+          "title": "QQ setup guide",
+          "intro": "QQ bots connect over WebSocket via the official botpy SDK, so no public callback URL is needed.",
+          "step1": "Register on the QQ Open Platform (q.qq.com) and create a bot.",
+          "step2": "Copy the AppID and AppSecret from the bot's development settings page.",
+          "step3": "Paste them into the AppID and AppSecret fields above.",
+          "step4": "Add the bot to a QQ group or chat with it privately, following the platform's sandbox/publish rules.",
+          "step5": "Return here, click Test connection, then enable the channel.",
+          "docsLabel": "Open the QQ Open Platform"
+        },
+        "email": {
+          "title": "Email setup guide",
+          "intro": "The email channel polls a mailbox over IMAP for incoming mail and replies over SMTP, so no public callback URL is needed.",
+          "step1": "Get the IMAP and SMTP host names and ports from your mail provider (usually imap.<provider> on 993 and smtp.<provider> on 587).",
+          "step2": "Enable IMAP and SMTP access in your mailbox settings and, if the provider requires one (Gmail, QQ Mail and other 2FA providers), create an app password.",
+          "step3": "Fill in the IMAP and SMTP credentials above, set From address, and add your own address to Allowed senders.",
+          "step4": "Click Test connection — it probes the IMAP login, the mailbox folder, and the SMTP login.",
+          "step5": "Tick Consent granted, then enable the channel; automatic replies then reach senders whose mail passes the DKIM/SPF checks.",
+          "docsLabel": "Open the Vibe-Trading docs"
+        },
+        "websocket": {
+          "title": "WebSocket setup guide",
+          "intro": "The WebSocket channel runs its own local server that clients connect to directly over a WebSocket URL, so no public callback URL is needed.",
+          "step1": "Choose a bind address: keep 127.0.0.1 for local-only use, or set 0.0.0.0 / :: to expose the server — a wildcard host requires a token or a token-issue secret.",
+          "step2": "Set a static token, or a token-issue path plus its bearer secret so clients can request short-lived tokens.",
+          "step3": "Connect clients with ws://host:port/path?client_id=...&token=...",
+          "step4": "Saving while the channel is running hot-swaps the server: connected clients (including this Web UI chat) briefly disconnect and reconnect.",
+          "step5": "Click Test connection — it validates the SSL certificate/key material and the address availability locally.",
+          "docsLabel": "Open the Vibe-Trading docs"
+        }
+      }
     },
     "generation": "生成設定",
     "dataSourceSettings": "資料來源設定",
@@ -444,6 +788,9 @@
         "kr_equity": "韓國股票",
         "ca_equity": "加拿大股票",
         "vietnam_equity": "越南股票",
+        "ar_equity": "Argentina Equities",
+        "uk_equity": "UK Equities",
+        "index": "Indices",
         "crypto": "加密貨幣",
         "futures": "期貨",
         "fund": "基金",
@@ -452,7 +799,9 @@
       }
     },
     "tushareToken": "Tushare Token",
+    "gildataToken": "Gildata token",
     "clearTushareToken": "清除已儲存的 Tushare Token",
+    "clearGildataToken": "Clear saved Gildata token",
     "saveDataSourceSettings": "儲存資料來源設定",
     "baostock": "BaoStock",
     "loadLlmSettingsFailed": "載入 LLM 設定失敗: {{message}}",
@@ -484,7 +833,8 @@
     "oauth": "OAuth",
     "authentication": "身份驗證",
     "apiKey": "API 金鑰",
-    "tushareTokenDesc": "用於中國 A 股、期貨、基金和宏觀資料。沒填的話會自動改用 AKShare 的免費資料。"
+    "tushareTokenDesc": "用於中國 A 股、期貨、基金和宏觀資料。沒填的話會自動改用 AKShare 的免費資料。",
+    "gildataTokenDesc": "Optional Gildata (Hundsun Juyuan) feed for China A-shares. When set, it joins the tail of the A-share fallback chain with forward-adjusted daily bars."
   },
   "qveris": {
     "title": "QVeris 工具市場",
@@ -597,7 +947,8 @@
       "failed": "失敗",
       "steps": "{{count}} 個步驟",
       "continue": "繼續",
-      "reattach": "重新連線"
+      "reattach": "重新連線",
+      "checkingFigures": "Checking the figures in this answer (round {{round}})…"
     },
     "resumeConnector": "恢復聯結器",
     "resumeConnectorTitle": "清除熔斷開關並恢復聯結器活動",
@@ -609,6 +960,8 @@
     "runNotFound": "執行記錄未找到",
     "runNotFoundDesc": "執行目錄可能已被刪除，或者瀏覽器未配置 API 訪問。如果遠端訪問，請檢查設定中的 API 認證金鑰是否已設定。",
     "goBack": "返回",
+    "showFullPrompt": "Show full prompt",
+    "showLessPrompt": "Show less",
     "chart": "圖表",
     "trades": "交易",
     "factor": "因子研究",
@@ -622,6 +975,8 @@
     "symbol": "標的",
     "weight": "權重",
     "rebalanceCount": "調倉次數",
+    "rebalanceExecuted": "Rebalance executions (fills)",
+    "rebalanceRealizedTurnover": "Realized rebalance turnover",
     "turnoverMean": "平均換手",
     "turnoverMax": "最大換手",
     "largestRebalance": "最大一次調倉",
@@ -659,6 +1014,33 @@
     "reproducibility": "可復現性",
     "metrics": "指標",
     "validationPayload": "驗證",
+    "trust": {
+      "executionRecords": "Execution records",
+      "executionDescription": "Recorded execution stages and the hashes of their inputs and results.",
+      "noExecutionRecords": "Execution records were not recorded for this run.",
+      "startedAt": "Started (UTC)",
+      "endedAt": "Ended (UTC)",
+      "argsHash": "Arguments SHA-256",
+      "resultHash": "Result SHA-256",
+      "metricEvidence": "Metric evidence",
+      "evidenceDescription": "References to saved metric data. Checksums identify the recorded files; this view does not independently verify them.",
+      "noMetricEvidence": "Metric evidence was not recorded for this run.",
+      "metric": "Metric",
+      "artifact": "Artifact",
+      "column": "Column",
+      "row": "Data row (1-based, excluding header)",
+      "artifactHash": "Artifact SHA-256",
+      "tools": {
+        "backtest": "Backtest",
+        "load_data": "Load data",
+        "generate_signals": "Generate signals"
+      },
+      "status": {
+        "ok": "Completed",
+        "error": "Failed",
+        "cancelled": "Cancelled"
+      }
+    },
     "artifactChecksums": "製品校驗和",
     "path": "路徑",
     "size": "大小",
@@ -666,6 +1048,8 @@
     "noBacktestSummary": "暫無回測摘要記錄。",
     "noReproducibilityHashes": "暫無可復現性雜湊記錄。",
     "noScalarMetrics": "暫無標量指標記錄。",
+    "noStructuredMetrics": "No structured metrics recorded.",
+    "structuredMetrics": "Structured metrics",
     "noValidationPayload": "暫無驗證資料記錄。",
     "noArtifactChecksums": "暫無製品校驗和記錄。",
     "noCodeFiles": "暫無程式碼檔案。",
@@ -733,6 +1117,9 @@
         "crypto": "加密貨幣",
         "futures": "期貨",
         "forex": "外匯",
+        "ar_equity": "Argentina equity",
+        "uk_equity": "UK equity",
+        "vietnam_equity": "Vietnam equity",
         "other": "其他"
       }
     },
@@ -811,10 +1198,10 @@
     "assetCodesHint": "逗號分隔的標的程式碼，如 BTC-USDT,ETH-USDT,AAPL,SPY",
     "windowDays": "視窗（天）",
     "method": "方法",
-    "compute": "計算",
-    "loading": "載入中...",
     "method_pearson": "皮爾遜相關",
     "method_spearman": "斯皮爾曼秩相關",
+    "compute": "計算",
+    "loading": "載入中...",
     "failedToCompute": "計算相關性失敗",
     "regimeTimeline": "相關性狀態時間線",
     "regimeTimelineHint": "邊密度 + 滯回狀態機的時間序列 — 描述性風險背景，並非交易訊號",
@@ -1201,7 +1588,15 @@
     "maxPerOrder": "每筆 ≤{{amount}}",
     "expiresOn": "到期日：{{date}}",
     "accountSummary": "{{broker}} · {{type}} 賬戶 · 資金來源：{{fundedBy}}",
-    "adjustRequestMessage": "針對授權提案「{{label}}」（選項 {{ordinal}}）的調整：{{text}}"
+    "adjustRequestMessage": "針對授權提案「{{label}}」（選項 {{ordinal}}）的調整：{{text}}",
+    "accountLoading": "Loading the broker's accounts…",
+    "accountLoadFailed": "Could not load the broker's accounts: {{error}}",
+    "accountLabel": "Account this mandate may trade",
+    "accountChoose": "Choose an account",
+    "accountDefault": " · broker default",
+    "accountDeactivated": " · deactivated",
+    "accountNotAgentic": " · agentic trading not allowed",
+    "accountHint": "The agent trades only this account. Nothing is chosen for you."
   },
   "messageBubble": {
     "elapsedTime": "本次回覆總耗時",
@@ -1249,11 +1644,6 @@
   },
   "errorBoundary": {
     "somethingWrong": "出了點問題，重新整理頁面就能繼續。"
-  },
-  "charts": {
-    "noPriceData": "這個標的還沒有價格資料",
-    "noCorrelationData": "至少選兩個標的才能比較",
-    "noEquityData": "還沒有淨值曲線——先跑一次回測"
   },
   "toolProgress": {
     "step": "步驟 {{step}} · {{tool}}",
@@ -1399,6 +1789,8 @@
   },
   "runDashboard": {
     "eyebrow": "量化研究 · 策略回測",
+    "noBacktestData": "This run has no backtest data to chart",
+    "noBacktestDataStudioHint": "It looks like a portfolio/risk analysis instead — check the Studio tab for its numbers.",
     "engine": "回測引擎",
     "portfolio": "投資組合",
     "systematicStrategy": "系統化交易策略",
@@ -1477,6 +1869,7 @@
       "errorLoad": "無法讀取持倉",
       "errorRefresh": "重新整理失敗",
       "errorReconnect": "賬戶重新連線失敗",
+      "errorReconnectTimeout": "Browser authorization timed out. Reconnect and complete the broker authorization promptly.",
       "errorSaveSettings": "無法儲存持倉設定",
       "errorExport": "匯出失敗"
     },
@@ -1507,7 +1900,8 @@
       "failed": "讀取失敗 — 未計入合計",
       "lastSuccess": "上一次成功讀取於 {{time}}",
       "noSuccess": "尚未成功讀取過",
-      "reconnect": "重新連線"
+      "reconnect": "重新連線",
+      "retryRead": "Retry read"
     },
     "holdings": {
       "title": "持倉明細",
@@ -1549,6 +1943,11 @@
     "env": {
       "live": "實盤",
       "paper": "模擬"
+    },
+    "compatibility": {
+      "native": "Native adapter",
+      "contractTested": "Contract-tested",
+      "experimental": "Experimental"
     },
     "editor": {
       "title": "管理持倉賬戶",
@@ -1595,14 +1994,31 @@
       "codexBody": "讓 Codex 執行 connector init，按券商官方文件補全只讀 adapter，透過 validate 後再 install。外掛安裝在本機目錄，不進入專案倉庫。",
       "readOnly": "結構只讀",
       "credentialSaved": "已儲存",
+      "optional": "(optional)",
+      "authType": "Authentication",
+      "dependency": "Local dependency",
       "oauthNote": "使用 OAuth；需要時透過重新連線完成授權。",
       "localNote": "憑證由現有的本地聯結器配置管理。",
       "saveVault": "儲存到鑰匙串",
       "savedVault": "憑證已儲存到系統鑰匙串。",
       "test": "測試連線",
       "testOk": "{{label}} 連線正常。",
+      "testFailed": "{{label}} check failed: {{error}}",
+      "unknownTestError": "The connector returned an unknown error.",
       "delete": "刪除",
-      "configured": "所需憑證已配置"
+      "configured": "所需憑證已配置",
+      "accountTitle": "Account",
+      "accountCurrent": "Reads the account ending ····{{last4}}",
+      "accountNone": "No account selected. This connection reads nothing until you choose one.",
+      "accountLoad": "Choose account",
+      "accountChange": "Change account",
+      "accountEmpty": "This login reaches no accounts.",
+      "accountPicker": "Accounts this login can reach",
+      "accountChoose": "Choose an account",
+      "accountDefault": " · broker default",
+      "accountDeactivated": " · deactivated",
+      "accountSave": "Use this account",
+      "accountSaved": "Account saved."
     }
   }
 }
