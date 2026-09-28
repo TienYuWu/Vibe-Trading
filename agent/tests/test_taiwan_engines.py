@@ -860,6 +860,50 @@ class TestTaiwanFundamentalsAndNews:
 
         assert _FINMIND_DATASET[statement] == dataset
 
+    # 2330's 2025 filings as FinMind serves them: income rows are single
+    # quarters, cash-flow rows are year-to-date.
+    _INCOME_2025 = [
+        {"period_end": "2025-12-31", "Revenue": 1046.0, "EPS": 19.51},
+        {"period_end": "2025-09-30", "Revenue": 990.0, "EPS": 17.44},
+        {"period_end": "2025-06-30", "Revenue": 934.0, "EPS": 15.36},
+        {"period_end": "2025-03-31", "Revenue": 839.0, "EPS": 13.95},
+    ]
+
+    @pytest.mark.parametrize("statement", ["income", "indicators"])
+    def test_annual_income_sums_the_four_quarters(self, statement: str) -> None:
+        """Taking the December row alone reported Q4 as the year: 2330's 2025
+        EPS came back as 19.51 instead of 66.26, and a P/E of 127x instead of
+        about 37x."""
+        from src.tools.financial_statements_tool import _finmind_annual
+
+        (year,) = _finmind_annual(self._INCOME_2025, statement)
+        assert year["period_end"] == "2025-12-31"
+        assert year["EPS"] == pytest.approx(66.26)
+        assert year["Revenue"] == pytest.approx(3809.0)
+
+    def test_annual_income_drops_a_year_missing_a_quarter(self) -> None:
+        """A partial year summed would read as a weak full year."""
+        from src.tools.financial_statements_tool import _finmind_annual
+
+        partial = [
+            {"period_end": "2026-06-30", "EPS": 20.0},
+            {"period_end": "2026-03-31", "EPS": 18.0},
+        ]
+        assert _finmind_annual(partial + self._INCOME_2025, "income")[0]["period_end"] == "2025-12-31"
+        assert len(_finmind_annual(partial, "income")) == 0
+
+    @pytest.mark.parametrize("statement", ["balance", "cashflow"])
+    def test_annual_balance_and_cashflow_keep_december(self, statement: str) -> None:
+        """A balance sheet is a point in time and cash flow is year-to-date,
+        so December already is the full year; summing would quadruple it."""
+        from src.tools.financial_statements_tool import _finmind_annual
+
+        rows = [
+            {"period_end": "2025-12-31", "NetCash": 2275.0},
+            {"period_end": "2025-09-30", "NetCash": 1549.0},
+        ]
+        assert _finmind_annual(rows, statement) == [rows[0]]
+
 
 class TestToolAllowlist:
     """Every tool schema is re-sent on every LLM call, so the registry is a

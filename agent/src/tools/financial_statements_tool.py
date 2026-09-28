@@ -597,9 +597,44 @@ _FINMIND_DATASET = {
 }
 
 # Taiwan issuers file quarterly only; there is no separate annual filing to
-# fetch, so an annual request is served by tagging Q4 rows. Ten years back is
-# enough for any screen this tool feeds and bounds the response size.
+# fetch, so an annual period is built from the quarters (see _finmind_annual).
+# Ten years back is enough for any screen this tool feeds and bounds the
+# response size.
 _FINMIND_YEARS_BACK = 10
+
+# FinMind's income rows are single quarters; balance-sheet rows are points in
+# time and cash-flow rows are year-to-date, so December already is the year.
+_FINMIND_QUARTERLY_FLOWS = {"income", "indicators"}
+
+
+def _finmind_annual(periods: list[dict[str, Any]], statement: str) -> list[dict[str, Any]]:
+    """Collapse FinMind quarterly periods into full-year periods, newest first.
+
+    Args:
+        periods: Per-quarter dicts keyed by ``period_end`` plus line items.
+        statement: One of :data:`_VALID_STATEMENTS`.
+
+    Returns:
+        One period per year ending in December. Income items are the sum of the
+        four quarters, and a year missing any quarter is dropped rather than
+        reported short. Balance and cash-flow statements keep the December row.
+    """
+    december = [p for p in periods if str(p["period_end"])[5:7] == "12"]
+    if statement not in _FINMIND_QUARTERLY_FLOWS:
+        return december
+    annual = []
+    for dec in december:
+        year = str(dec["period_end"])[:4]
+        quarters = [p for p in periods if str(p["period_end"])[:4] == year]
+        if len(quarters) != 4:
+            continue
+        summed = {
+            k: sum(q[k] for q in quarters)
+            for k in dec
+            if k != "period_end" and all(isinstance(q.get(k), (int, float)) for q in quarters)
+        }
+        annual.append({"period_end": dec["period_end"], **summed})
+    return annual
 
 
 def _fetch_finmind_statement(code: str, *, statement: str, period: str) -> dict[str, Any]:
@@ -613,7 +648,7 @@ def _fetch_finmind_statement(code: str, *, statement: str, period: str) -> dict[
         code: Taiwan symbol with a ``.TW``/``.TWO`` suffix.
         statement: One of :data:`_VALID_STATEMENTS`.
         period: ``"annual"`` or ``"quarter"``. Taiwan files quarterly, so
-            ``annual`` keeps only the Q4 (December) filing of each year.
+            ``annual`` is built from the quarters by :func:`_finmind_annual`.
 
     Returns:
         ``{"periods": [...]}`` on success or ``{"error": ...}`` on failure.
@@ -659,8 +694,10 @@ def _fetch_finmind_statement(code: str, *, statement: str, period: str) -> dict[
 
     periods = [by_date[d] for d in sorted(by_date, reverse=True)]
     if period == "annual":
-        # No annual filing exists; December is the full-year close.
-        periods = [p for p in periods if str(p["period_end"])[5:7] == "12"]
+        return {"periods": _finmind_annual(periods, statement)}
+    if statement == "cashflow":
+        # Year-to-date per the filing: Q2 covers January to June.
+        return {"periods": periods, "basis": "year_to_date"}
     return {"periods": periods}
 
 
@@ -777,7 +814,8 @@ class FinancialStatementsTool(BaseTool):
         "Hong Kong (.HK), Taiwan (.TW/.TWO) and UK LSE (.L). US uses SEC EDGAR "
         "companyfacts; A-share and HK use Eastmoney; UK uses Yahoo quoteSummary "
         "(annual history); Taiwan uses FinMind, which files quarterly only -- an "
-        "annual request returns the Q4 close. Taiwan amounts are TWD. Reports come "
+        "annual income statement sums the four quarters, and Taiwan quarterly "
+        "cash flow is year-to-date. Taiwan amounts are TWD. Reports come "
         "back newest-first as flat per-period rows. Use "
         'this to read fundamentals before building a valuation or screen. Example: '
         '{"code": "600519.SH", "statement": "income", "period": "annual"}.'
