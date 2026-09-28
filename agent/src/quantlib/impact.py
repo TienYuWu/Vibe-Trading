@@ -85,7 +85,7 @@ def _check_order(price: ArrayLike, direction: int) -> np.ndarray:
             cost.
     """
     prices = np.asarray(price, dtype=float)
-    if not np.all(prices > 0.0):
+    if not np.all(np.isfinite(prices)) or not np.all(prices > 0.0):
         raise ValueError(f"price must be strictly positive, got {price!r}")
     if direction not in (1, -1):
         raise ValueError(f"direction must be 1 (buy) or -1 (sell), got {direction!r}")
@@ -109,9 +109,9 @@ def _participation_rate(volume_traded: ArrayLike, adv: ArrayLike) -> np.ndarray:
     """
     volumes = np.asarray(volume_traded, dtype=float)
     advs = np.asarray(adv, dtype=float)
-    if not np.all(volumes >= 0.0):
+    if not np.all(np.isfinite(volumes)) or not np.all(volumes >= 0.0):
         raise ValueError(f"volume_traded must be non-negative, got {volume_traded!r}")
-    if not np.all(advs > 0.0):
+    if not np.all(np.isfinite(advs)) or not np.all(advs > 0.0):
         raise ValueError(f"adv must be strictly positive, got {adv!r}")
     return volumes / advs
 
@@ -167,7 +167,7 @@ def fixed_slippage(price: float, direction: int, bps: float = DEFAULT_SLIPPAGE_B
     """
     prices = _check_order(price, direction)
     rates = np.asarray(bps, dtype=float)
-    if not np.all(rates >= 0.0):
+    if not np.all(np.isfinite(rates)) or not np.all(rates >= 0.0):
         raise ValueError(f"bps must be non-negative, got {bps!r}")
     return _fill(prices, direction, rates / _BPS_PER_UNIT)
 
@@ -203,7 +203,7 @@ def linear_impact(
     """
     prices = _check_order(price, direction)
     coeffs = np.asarray(impact_coeff, dtype=float)
-    if not np.all(coeffs >= 0.0):
+    if not np.all(np.isfinite(coeffs)) or not np.all(coeffs >= 0.0):
         raise ValueError(f"impact_coeff must be non-negative, got {impact_coeff!r}")
     return _fill(prices, direction, coeffs * _participation_rate(volume_traded, adv))
 
@@ -245,9 +245,9 @@ def sqrt_impact(
     prices = _check_order(price, direction)
     vols = np.asarray(volatility, dtype=float)
     etas = np.asarray(eta, dtype=float)
-    if not np.all(vols >= 0.0):
+    if not np.all(np.isfinite(vols)) or not np.all(vols >= 0.0):
         raise ValueError(f"volatility must be non-negative, got {volatility!r}")
-    if not np.all(etas >= 0.0):
+    if not np.all(np.isfinite(etas)) or not np.all(etas >= 0.0):
         raise ValueError(f"eta must be non-negative, got {eta!r}")
     impact = etas * vols * np.sqrt(_participation_rate(volume_traded, adv))
     return _fill(prices, direction, impact)

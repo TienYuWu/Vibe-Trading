@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Dict
 from unittest.mock import patch
 
@@ -39,7 +40,7 @@ class TestFfillLimit:
         df = pd.DataFrame({"close": close, "open": close}, index=dates)
         sig = pd.Series(1.0, index=dates)
 
-        _, close_df, _, _ = _align({"A": df}, {"A": sig}, ["A"])
+        _, close_df, _, _, _ = _align({"A": df}, {"A": sig}, ["A"])
         # 3-bar gap should be filled — no NaN in close
         assert close_df["A"].isna().sum() == 0
 
@@ -50,7 +51,7 @@ class TestFfillLimit:
         df = pd.DataFrame({"close": close, "open": close}, index=dates)
         sig = pd.Series(1.0, index=dates)
 
-        _, close_df, _, _ = _align({"A": df}, {"A": sig}, ["A"])
+        _, close_df, _, _, _ = _align({"A": df}, {"A": sig}, ["A"])
         # 8-bar gap: ffill covers first 5, remaining 3 should be NaN
         nan_count = close_df["A"].isna().sum()
         assert nan_count == 3, f"Expected 3 NaN bars after ffill limit=5, got {nan_count}"
@@ -72,7 +73,7 @@ class TestFfillLimit:
             "BAD": pd.Series(1.0, index=dates),
         }
 
-        _, close_df, pos_df, _ = _align(data_map, signal_map, ["GOOD", "BAD"])
+        _, close_df, _, pos_df, _ = _align(data_map, signal_map, ["GOOD", "BAD"])
         assert "BAD" not in close_df.columns, "All-NaN symbol should be dropped"
         assert "GOOD" in close_df.columns
         assert "BAD" not in pos_df.columns
@@ -115,17 +116,17 @@ class TestSymbolIsolation:
         signal_map = {"GOOD": sig.copy(), "BAD": sig.copy()}
         valid_codes = ["GOOD", "BAD"]
 
-        _, close_df, target_pos, _ = _align(data_map, signal_map, valid_codes)
+        _, close_df, _, target_pos, _ = _align(data_map, signal_map, valid_codes)
 
         engine = ChinaAEngine({"initial_cash": 1_000_000})
 
         # Patch the opening-plan boundary to throw for BAD only.
         original_plan = ChinaAEngine._plan_open_order
 
-        def _exploding_plan(self, symbol, target_weight, df, ts, equity):
+        def _exploding_plan(self, symbol, target_weight, df, ts, equity, **kwargs):
             if symbol == "BAD":
                 raise RuntimeError("Simulated failure for BAD")
-            return original_plan(self, symbol, target_weight, df, ts, equity)
+            return original_plan(self, symbol, target_weight, df, ts, equity, **kwargs)
 
         with patch.object(ChinaAEngine, "_plan_open_order", _exploding_plan):
             # Should NOT raise — exception is caught internally
@@ -164,9 +165,14 @@ class TestSymbolIsolation:
                 assert frame["income_total_revenue"].iloc[-1] == 120.0
                 return {"000001.SZ": pd.Series(0.0, index=frame.index)}
 
-        def fake_enrich(data_map, provider, fields_by_table, *, as_of, periods=None):
+        def fake_enrich(
+            data_map, provider, fields_by_table, *, as_of, periods=None, subdaily="reject"
+        ):
             assert fields_by_table == {"income": ["total_revenue"]}
             assert as_of == "2024-04-30"
+            # #1387: the engine forwards the sub-daily PIT policy, and the
+            # default must stay the fail-closed one.
+            assert subdaily == "reject"
             enriched = {code: frame.copy() for code, frame in data_map.items()}
             enriched["000001.SZ"]["income_total_revenue"] = [None, 80.0, 120.0]
             return enriched
@@ -216,24 +222,32 @@ class TestSymbolIsolation:
                 return {"000001.SZ": pd.Series(0.0, index=data_map["000001.SZ"].index)}
 
         def fake_resolve_benchmark(**kwargs):
-            return SimpleNamespace(
+            # The real result type, not a namespace: the engine re-measures the
+            # benchmark over the evaluated window via BenchmarkResult's own
+            # method, so a stub that only carries attributes would not exercise
+            # the path under test.
+            from backtest.benchmark import BenchmarkResult
+
+            return BenchmarkResult(
                 ticker="000300.SH",
                 ret_series=pd.Series([0.0, 0.01, -0.005], index=dates),
                 total_ret=0.00495,
+                close=pd.Series([100.0, 101.0, 100.495], index=dates),
             )
 
         monkeypatch.setattr("backtest.benchmark.resolve_benchmark", fake_resolve_benchmark)
 
         engine = ChinaAEngine({"initial_cash": 1_000_000})
+        config = {
+            "codes": ["000001.SZ"],
+            "start_date": "2024-04-01",
+            "end_date": "2024-04-30",
+            "source": "tushare",
+            "benchmark": "000300.SH",
+            "initial_cash": 1_000_000,
+        }
         metrics = engine.run_backtest(
-            {
-                "codes": ["000001.SZ"],
-                "start_date": "2024-04-01",
-                "end_date": "2024-04-30",
-                "source": "tushare",
-                "benchmark": "000300.SH",
-                "initial_cash": 1_000_000,
-            },
+            config,
             FakeLoader(),
             SignalEngine(),
             tmp_path,
@@ -245,7 +259,44 @@ class TestSymbolIsolation:
         run_card_path = tmp_path / "run_card.json"
         assert run_card_path.exists()
         run_card = json.loads(run_card_path.read_text(encoding="utf-8"))
-        assert run_card["schema_version"] == "0.1"
+        assert run_card["schema_version"] == "1.0"
+        assert len(run_card["tool_traces"]) == 1
+        assert run_card["tool_traces"][0]["tool"] == "backtest"
+        assert run_card["tool_traces"][0]["status"] == "ok"
+        started_at = datetime.fromisoformat(
+            run_card["tool_traces"][0]["started_at"].replace("Z", "+00:00")
+        )
+        ended_at = datetime.fromisoformat(
+            run_card["tool_traces"][0]["ended_at"].replace("Z", "+00:00")
+        )
+        assert started_at.tzinfo == timezone.utc
+        assert ended_at.tzinfo == timezone.utc
+        assert started_at <= ended_at
+        assert (
+            run_card["tool_traces"][0]["args_hash"]
+            == hashlib.sha256(
+                json.dumps(
+                    config,
+                    sort_keys=True,
+                    default=str,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        assert (
+            run_card["tool_traces"][0]["result_hash"]
+            == hashlib.sha256(
+                json.dumps(
+                    metrics,
+                    sort_keys=True,
+                    default=str,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        assert run_card["citations"]
         assert run_card["backtest"]["codes"] == ["000001.SZ"]
         assert run_card["data_sources"] == ["tushare"]
         assert run_card["metrics"]["benchmark_return"] == 0.00495
@@ -552,7 +603,7 @@ class TestFullBacktestRobustness:
         signal_map = {"NORMAL": sig.copy(), "SUSPENDED": sig.copy()}
         valid_codes = ["NORMAL", "SUSPENDED"]
 
-        _, close_df, target_pos, _ = _align(data_map, signal_map, valid_codes)
+        _, close_df, _, target_pos, _ = _align(data_map, signal_map, valid_codes)
 
         # The 14-bar gap should not be fully filled
         suspended_nan_count = close_df["SUSPENDED"].isna().sum()

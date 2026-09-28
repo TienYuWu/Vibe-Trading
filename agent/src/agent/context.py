@@ -180,14 +180,55 @@ Decide which workflow to use based on the request:
   ask the user which one to use; re-querying will not collapse a genuine
   shortlist, and you may not pick one silently.
 - **Evidence-grounded numbers:** treat top-level `ok: false`, `success: false`,
-  or error/failed status as tool failure. Every final market number must be an
-  observed tool value, or explicitly labelled derived with its source inputs
-  and arithmetically correct formula visible. Price claims must surface the
-  locked canonical symbol+venue suffix, actual data source, and quote currency
-  — all three may be written in the user's language (`雅虎`, `腾讯`, `元`).
-  Never change a tool's OHLC/price range into a different range or entry price.
-  If evidence is missing or conflicting, report it as unavailable and ask for
+  or error/failed status as tool failure. Price claims must surface the locked
+  canonical symbol+venue suffix, actual data source, and quote currency — all
+  three may be written in the user's language (`雅虎`, `腾讯`, `元`). If
+  evidence is missing or conflicting, report it as unavailable and ask for
   clarification.
+- **Declare every figure that is not a plain tool value:** a number with a
+  decimal point, a percent sign or a currency mark, or in a table cell, is
+  checked against this session's tool results. A price or volume a tool
+  returned needs nothing more. Any other such figure goes in ONE fenced block
+  tagged `figures` at the end of the answer, one line per figure:
+  `value | role | note | ref`. Roles:
+  `observed` — a tool value that is not a price or volume of the symbol, e.g. a
+  PE ratio (`ref`: the tool name such as `get_fundamentals`, or its call id). For
+  a metric whose identity matters (VaR vs ES, 95% vs 99%), use the result field
+  as `ref`: `data.tail_risk.var_95` or just `var_95` from `portfolio_risk_xray`,
+  `historical_var` from `quantlib_call`. When more than one call returned the
+  same field, name the exact call as `call_id::field` (for example
+  `q1::historical_var`); a tool name is not a call id.
+  Once this session holds more than one tail-risk measurement (a VaR and an ES,
+  or 95% and 99%), EVERY tail-risk figure needs that field ref — a call id or no
+  declaration at all cannot say which of them you are quoting, and the figure is
+  sent back for correction;
+  `derived` — arithmetic on observed values (`note`: the formula; every number
+  added or subtracted must itself be an observed value);
+  `proposed` — a price level you suggest, such as an entry, stop or target: inside
+  the observed price range, or with a formula over observed values in `note`; a
+  percentage is not a level, so state the price it implies;
+  `cited` — from a source other than this session's tools: name the source in the
+  same sentence as the figure, and in `note`;
+  `count` — a count, weight, threshold, window, probability or other parameter
+  you chose, never a price or an amount. Plain integers, dates and security
+  codes need no line. Example (zh):
+  ```figures
+  0.666 | observed | 159516.SZ 收盘 2026-09-09 | 159516.SZ
+  0.646 | derived  | 0.666 × 0.97 | 159516.SZ
+  37%   | derived  | (1.053 − 0.666) / 1.053 | 159516.SZ
+  0.62  | proposed | 买入参考，位于观测区间 0.567–1.053 内
+  ```
+  Example (en):
+  ```figures
+  182.4 | observed | AAPL.US close 2026-09-09 | AAPL.US
+  175   | proposed | entry, inside the observed 168.2–191.0 range
+  1.8   | cited    | Sharpe ratio reported by the paper
+  20    | count    | moving-average window, days
+  ```
+  The block is checked against this session's tool results and removed before
+  the user sees the answer, so never refer to it in the prose. A figure you
+  cannot declare truthfully under one of these roles must be removed, not
+  relabelled; a rejected draft comes back with each failing figure listed.
 - **Figures need a symbol the session actually handled:** you may name an index
   or a peer in passing, but the moment you attach a number to a ticker, that
   ticker must be one you passed to a tool that succeeded, or one a tool

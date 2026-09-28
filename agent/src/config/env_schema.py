@@ -20,9 +20,10 @@ Usage::
 from __future__ import annotations
 
 import os
+import types
 from enum import Enum
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
@@ -73,6 +74,28 @@ def _parse_responses_api_bool(v: Any) -> Any:
 ResponsesApiBool = Annotated[bool, BeforeValidator(_parse_responses_api_bool)]
 
 
+def _numeric_type(annotation: Any) -> Any:
+    """Return ``int``/``float`` for that type or an ``Optional`` of it, else ``None``.
+
+    Handles both ``typing.Optional[int]`` and the ``int | None`` spelling,
+    which produce different ``get_origin`` results (``typing.Union`` vs.
+    ``types.UnionType``).
+
+    Args:
+        annotation: The field annotation resolved by Pydantic.
+
+    Returns:
+        Its numeric type, or ``None`` for annotations needing normal validation.
+    """
+    if annotation is int or annotation is float:
+        return annotation
+    if get_origin(annotation) in (Union, types.UnionType):
+        args = [a for a in get_args(annotation) if a is not type(None)]
+        if len(args) == 1 and args[0] in (int, float):
+            return args[0]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------
@@ -109,13 +132,13 @@ class _EnvBase(BaseModel):
                 env_val = os.environ[alias]
                 # Safe coercion for numeric fields: drop unparseable values
                 # so Pydantic falls back to the field default.
-                annotation = field_info.annotation
-                if annotation is int and isinstance(env_val, str):
+                numeric_type = _numeric_type(field_info.annotation)
+                if numeric_type is int and isinstance(env_val, str):
                     try:
                         env_val = int(env_val)
                     except ValueError:
                         continue
-                elif annotation is float and isinstance(env_val, str):
+                elif numeric_type is float and isinstance(env_val, str):
                     try:
                         env_val = float(env_val)
                     except ValueError:
@@ -139,6 +162,11 @@ class LLMConfig(_EnvBase):
     langchain_provider: str = Field(alias="LANGCHAIN_PROVIDER", default="openai")
     langchain_model_name: str = Field(alias="LANGCHAIN_MODEL_NAME", default="")
     langchain_temperature: float = Field(alias="LANGCHAIN_TEMPERATURE", default=0.0)
+    # The native Anthropic credential. Read through bare ``os.getenv`` in
+    # ``llm.py``, which left it out of this schema — so ``provider doctor`` and
+    # preflight could not tell a missing key from a working one and the failure
+    # surfaced as an opaque 401 at the first call instead (#1223).
+    anthropic_api_key: str = Field(alias="ANTHROPIC_API_KEY", default="")
     anthropic_max_tokens: int | None = Field(alias="ANTHROPIC_MAX_TOKENS", default=None, gt=0)
     timeout_seconds: int = Field(alias="TIMEOUT_SECONDS", default=120)
     max_retries: int = Field(alias="MAX_RETRIES", default=2)
@@ -155,6 +183,9 @@ class LLMConfig(_EnvBase):
     openai_model: str = Field(alias="OPENAI_MODEL", default="")
     vibe_trading_disable_http_proxy: EnvBool = Field(
         alias="VIBE_TRADING_DISABLE_HTTP_PROXY", default=False,
+    )
+    vibe_trading_anthropic_prompt_cache: EnvBool = Field(
+        alias="VIBE_TRADING_ANTHROPIC_PROMPT_CACHE", default=True,
     )
 
 
@@ -180,6 +211,11 @@ class DataConfig(_EnvBase):
     alphavantage_api_key: str = Field(alias="ALPHAVANTAGE_API_KEY", default="")
     tiingo_api_key: str = Field(alias="TIINGO_API_KEY", default="")
     fmp_api_key: str = Field(alias="FMP_API_KEY", default="")
+    gildata_token: str = Field(alias="GILDATA_TOKEN", default="")
+    gildata_base_url: str = Field(
+        alias="GILDATA_BASE_URL",
+        default="https://api.gildata.com/mcp-servers/aidata-assistant-srv-rawapi",
+    )
     fred_api_key: str = Field(alias="FRED_API_KEY", default="")
     vibe_trading_iwencai_key: str = Field(alias="VIBE_TRADING_IWENCAI_KEY", default="")
     vibe_trading_sec_ua: str = Field(alias="VIBE_TRADING_SEC_UA", default="")
@@ -225,12 +261,15 @@ class DataConfig(_EnvBase):
     market_data_order_ca_equity: str = Field(alias="MARKET_DATA_ORDER_CA_EQUITY", default="")
     market_data_order_tw_equity: str = Field(alias="MARKET_DATA_ORDER_TW_EQUITY", default="")
     market_data_order_tw_futures: str = Field(alias="MARKET_DATA_ORDER_TW_FUTURES", default="")
+    market_data_order_ar_equity: str = Field(alias="MARKET_DATA_ORDER_AR_EQUITY", default="")
+    market_data_order_uk_equity: str = Field(alias="MARKET_DATA_ORDER_UK_EQUITY", default="")
     market_data_order_vietnam_equity: str = Field(alias="MARKET_DATA_ORDER_VIETNAM_EQUITY", default="")
     market_data_order_crypto: str = Field(alias="MARKET_DATA_ORDER_CRYPTO", default="")
     market_data_order_futures: str = Field(alias="MARKET_DATA_ORDER_FUTURES", default="")
     market_data_order_fund: str = Field(alias="MARKET_DATA_ORDER_FUND", default="")
     market_data_order_macro: str = Field(alias="MARKET_DATA_ORDER_MACRO", default="")
     market_data_order_forex: str = Field(alias="MARKET_DATA_ORDER_FOREX", default="")
+    market_data_order_index: str = Field(alias="MARKET_DATA_ORDER_INDEX", default="")
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +387,9 @@ class SwarmConfig(_EnvBase):
     swarm_timeout: int = Field(alias="SWARM_TIMEOUT", default=1800)
     swarm_heartbeat_interval_s: float = Field(alias="SWARM_HEARTBEAT_INTERVAL_S", default=3.0)
     swarm_stream_retry_delay_s: float = Field(alias="SWARM_STREAM_RETRY_DELAY_S", default=1.0)
+    swarm_stream_retry_max_delay_s: float = Field(
+        alias="SWARM_STREAM_RETRY_MAX_DELAY_S", default=30.0, ge=0
+    )
     swarm_worker_retry_base_delay_s: float = Field(
         alias="SWARM_WORKER_RETRY_BASE_DELAY_S", default=1.0, ge=0
     )
@@ -357,11 +399,16 @@ class SwarmConfig(_EnvBase):
     swarm_grounding_max_symbols: int = Field(alias="SWARM_GROUNDING_MAX_SYMBOLS", default=8)
 
     @model_validator(mode="after")
-    def _validate_worker_retry_delays(self) -> SwarmConfig:
+    def _validate_retry_delays(self) -> SwarmConfig:
         if self.swarm_worker_retry_max_delay_s < self.swarm_worker_retry_base_delay_s:
             raise ValueError(
                 "SWARM_WORKER_RETRY_MAX_DELAY_S must be greater than or equal to "
                 "SWARM_WORKER_RETRY_BASE_DELAY_S"
+            )
+        if self.swarm_stream_retry_max_delay_s < self.swarm_stream_retry_delay_s:
+            raise ValueError(
+                "SWARM_STREAM_RETRY_MAX_DELAY_S must be greater than or equal to "
+                "SWARM_STREAM_RETRY_DELAY_S"
             )
         return self
 
@@ -398,6 +445,9 @@ class AgentTuningConfig(_EnvBase):
         alias="VT_REASONING_DELTA_MIN_INTERVAL_S", default=1.0,
     )
     vt_stream_retry_delay_s: float = Field(alias="VT_STREAM_RETRY_DELAY_S", default=1.0)
+    vt_stream_retry_max_delay_s: float = Field(
+        alias="VT_STREAM_RETRY_MAX_DELAY_S", default=30.0, ge=0
+    )
     vibe_trading_tool_timeout_seconds: float = Field(
         alias="VIBE_TRADING_TOOL_TIMEOUT_SECONDS", default=1800.0,
     )
@@ -419,6 +469,9 @@ class AgentTuningConfig(_EnvBase):
     )
     vibe_trading_enable_scheduler: EnvBool = Field(
         alias="VIBE_TRADING_ENABLE_SCHEDULER", default=False,
+    )
+    vibe_contextual_identity_constraints: EnvBool = Field(
+        alias="VIBE_CONTEXTUAL_IDENTITY_CONSTRAINTS", default=True,
     )
     vibe_trading_scheduler_max_consecutive_failures: int = Field(
         alias="VIBE_TRADING_SCHEDULER_MAX_CONSECUTIVE_FAILURES", default=3,
@@ -444,6 +497,15 @@ class AgentTuningConfig(_EnvBase):
     vibe_live_authorize_timeout_s: int = Field(
         alias="VIBE_LIVE_AUTHORIZE_TIMEOUT_SECONDS", default=300,
     )
+
+    @model_validator(mode="after")
+    def _validate_stream_retry_delays(self) -> AgentTuningConfig:
+        if self.vt_stream_retry_max_delay_s < self.vt_stream_retry_delay_s:
+            raise ValueError(
+                "VT_STREAM_RETRY_MAX_DELAY_S must be greater than or equal to "
+                "VT_STREAM_RETRY_DELAY_S"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

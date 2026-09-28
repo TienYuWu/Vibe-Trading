@@ -29,6 +29,10 @@ _SECTION_MODULES: Dict[str, str] = {
 }
 _ALL_SECTIONS = tuple(_SECTION_MODULES)
 
+# Always fetched (in addition to the requested sections) to carry Yahoo's own
+# listing identity: venue and quote currency, kept separate from fundamentals.
+_LISTING_MODULE = "price"
+
 # Cap list-valued sections so a verbose payload cannot bloat the envelope.
 _MAX_ROWS = 25
 
@@ -188,6 +192,43 @@ def _recommendation_trend(module: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def _listing_identity(
+    price_module: Dict[str, Any], financial_module: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Shape Yahoo-declared listing identity, distinct from issuer fundamentals.
+
+    Only fields the provider explicitly supplies are used here; none of this
+    is inferred from the ticker suffix or company name. The underlying-issuer
+    relationship is included only when Yahoo's payload names one.
+
+    Args:
+        price_module: The raw ``price`` quoteSummary module.
+        financial_module: The raw ``financialData`` module, or ``{}`` when
+            the ``financials`` section was not requested.
+
+    Returns:
+        A compact row with the listing symbol, venue, and quote currency,
+        plus ``financial_currency``/``underlying_symbol`` when Yahoo supplies
+        them.
+    """
+    row: Dict[str, Any] = {
+        "symbol": price_module.get("symbol"),
+        "exchange": price_module.get("exchange"),
+        "exchange_name": (
+            price_module.get("fullExchangeName") or price_module.get("exchangeName")
+        ),
+        "quote_type": price_module.get("quoteType"),
+        "currency": price_module.get("currency"),
+    }
+    underlying_symbol = price_module.get("underlyingSymbol")
+    if underlying_symbol:
+        row["underlying_symbol"] = underlying_symbol
+    financial_currency = financial_module.get("financialCurrency")
+    if financial_currency:
+        row["financial_currency"] = financial_currency
+    return row
+
+
 # Section name -> (yahoo module name, shaper). One entry per supported section.
 _SHAPERS = {
     "key_stats": _key_stats,
@@ -226,32 +267,17 @@ def _resolve_sections(sections: Optional[List[str]]) -> List[str]:
 
 
 def _market_for(ticker: str) -> str:
-    """Classify a ticker into a coarse market label for the envelope.
-
-    Anything unrecognised used to fall through to ``"us"``, which is worse than
-    an error for a cross-market caller: Yahoo answers ``2330.TW`` happily, so
-    the envelope claimed a TWD enterprise value of 6.0e13 was a US figure and
-    invited comparison against TSM.US's USD 1.5e13 -- a 30x unit error that
-    looks like a valuation gap.
-    """
+    """Classify a ticker into a coarse market label for the envelope."""
     upper = ticker.strip().upper()
     if upper.endswith(".HK"):
         return "hk"
     if upper.endswith((".TW", ".TWO")):
         return "tw"
+    if upper.endswith(".L"):
+        return "uk"
+    if upper.endswith(".BA"):
+        return "ar"
     return "us"
-
-
-def _currency_for(ticker: str) -> str:
-    """Settlement currency for *ticker*, so figures are never unit-ambiguous.
-
-    Derived from the symbol rather than fetched: the suffix already determines
-    the venue, and an extra Yahoo module would add a request that can fail and
-    leave the amounts unlabelled.
-    """
-    from backtest.engines._market_hooks import code_currency
-
-    return code_currency(ticker.strip().upper())
 
 
 class StockProfileTool(BaseTool):
@@ -259,15 +285,16 @@ class StockProfileTool(BaseTool):
 
     name = "get_stock_profile"
     description = (
-        "Fetch a read-only company profile for a US, Hong Kong or Taiwan "
-        "listing from "
-        "Yahoo Finance: valuation key statistics, analyst price targets and "
-        "earnings/revenue estimates, institutional and insider ownership, and "
-        "the analyst recommendation trend. Use this for fundamentals and "
-        "consensus context, not for OHLCV price bars (use get_market_data). "
-        "Every amount is in the envelope's 'currency' field -- never compare "
-        "figures across two profiles without checking it matches. "
-        'Example: get_stock_profile(ticker="AAPL.US", '
+        "Fetch a read-only company profile for a US, Hong Kong, Taiwan (.TW/.TWO), "
+        "UK (LSE .L), or Argentina (BYMA .BA) "
+        "listing from Yahoo Finance: valuation key statistics, analyst price "
+        "targets and earnings/revenue estimates, institutional and insider "
+        "ownership, and the analyst recommendation trend. Always includes "
+        "the listing's own venue and quote currency, kept separate from "
+        "issuer fundamentals so a secondary/international listing does not "
+        "read as the primary one. Use this for fundamentals and consensus "
+        "context, not for OHLCV price bars (use get_market_data). Example: "
+        'get_stock_profile(ticker="AAPL.US", '
         'sections=["key_stats", "financials"]).'
     )
     parameters = {
@@ -276,8 +303,9 @@ class StockProfileTool(BaseTool):
             "ticker": {
                 "type": "string",
                 "description": (
-                    "US or HK symbol. US uses a bare or .US suffix (AAPL or "
-                    "AAPL.US); HK uses a zero-padded .HK code (00700.HK)."
+                    "US, HK, UK (LSE .L), or Argentina (BYMA .BA) symbol. US uses a bare or .US suffix "
+                    "(AAPL or AAPL.US); HK uses a zero-padded .HK code "
+                    "(00700.HK); UK uses the .L suffix (VOD.L)."
                 ),
             },
             "sections": {
@@ -307,8 +335,11 @@ class StockProfileTool(BaseTool):
 
         Returns:
             A JSON envelope string. On success:
-            ``{"ok": true, "market": str, "currency": str, "source": "yahoo",
-            "data": {"ticker": str, "sections": {<name>: <shaped>}}}``.
+            ``{"ok": true, "market": str, "source": "yahoo",
+            "data": {"ticker": str, "listing": {...}, "sections":
+            {<name>: <shaped>}}}``. ``listing`` carries Yahoo's own venue and
+            quote-currency identity for the instrument, independent of the
+            issuer fundamentals in ``sections``.
             On failure: ``{"ok": false, "error": str}``.
         """
         ticker = str(kwargs.get("ticker") or "").strip()
@@ -320,7 +351,9 @@ class StockProfileTool(BaseTool):
         except ValueError as exc:
             return self._error(str(exc))
 
-        modules = [_SECTION_MODULES[name] for name in sections]
+        modules = list(
+            dict.fromkeys([_LISTING_MODULE, *(_SECTION_MODULES[n] for n in sections)])
+        )
         try:
             summary = get_quote_summary(ticker, modules)
         except Exception as exc:  # noqa: BLE001 - surface upstream as envelope
@@ -332,13 +365,19 @@ class StockProfileTool(BaseTool):
             module = summary.get(_SECTION_MODULES[name]) or {}
             shaped[name] = _SHAPERS[name](module if isinstance(module, dict) else {})
 
+        price_module = summary.get(_LISTING_MODULE) or {}
+        financial_module = summary.get(_SECTION_MODULES["financials"]) or {}
+        listing = _listing_identity(
+            price_module if isinstance(price_module, dict) else {},
+            financial_module if isinstance(financial_module, dict) else {},
+        )
+
         return json.dumps(
             {
                 "ok": True,
                 "market": _market_for(ticker),
-                "currency": _currency_for(ticker),
                 "source": "yahoo",
-                "data": {"ticker": ticker, "sections": shaped},
+                "data": {"ticker": ticker, "listing": listing, "sections": shaped},
             },
             ensure_ascii=False,
         )

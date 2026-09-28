@@ -1,6 +1,6 @@
 {
   "app": {
-    "version": "v0.1.14"
+    "version": "v0.1.15"
   },
   "layout": {
     "home": "홈",
@@ -122,9 +122,9 @@
     "connectorVerifyFailed": "연결 검증에 실패했습니다.",
     "diagnosticCredentialsPartial": "인증 정보가 불완전합니다. 필수 변수를 모두 설정하고 서비스를 다시 생성하세요.",
     "diagnosticCredentialsConflict": "인증 정보 출처가 충돌합니다. 완전한 출처 하나만 남긴 뒤 다시 시도하세요.",
-    "diagnosticSdkMissing": "백엔드 서비스에 Longbridge SDK가 설치되어 있지 않습니다.",
+    "diagnosticSdkMissing": "이 브로커에 필요한 SDK가 백엔드 서비스에 설치되어 있지 않습니다.",
     "diagnosticAuthenticationFailed": "인증에 실패했습니다. 설정된 인증 정보를 확인하세요.",
-    "diagnosticNetworkUnreachable": "Longbridge 서비스에 연결할 수 없습니다. 네트워크 연결을 확인하고 다시 시도하세요.",
+    "diagnosticNetworkUnreachable": "브로커 서비스 또는 로컬 게이트웨이에 연결할 수 없습니다. 연결 주소와 네트워크 연결을 확인한 후 다시 시도하세요.",
     "diagnosticBrokerError": "브로커가 읽기 전용 검증 요청을 거부했습니다. 다시 시도하거나 백엔드 로그를 확인하세요."
   },
   "scheduled": {
@@ -416,7 +416,346 @@
       "stoppedToast": "IM 채널이 중지되었습니다",
       "refreshFailed": "IM 채널 새로 고침 실패",
       "startFailed": "IM 채널 시작 실패",
-      "stopFailed": "IM 채널 중지 실패"
+      "stopFailed": "IM 채널 중지 실패",
+      "config": {
+        "toggleConfig": "{{name}} 설정",
+        "keepCurrent": "현재 값 유지({{masked}})",
+        "secretNotSet": "설정되지 않음",
+        "clearSecret": "지우기",
+        "required": "필수",
+        "listPlaceholder": "값을 입력하고 Enter로 추가",
+        "removeValue": "{{value}} 제거",
+        "save": "설정 저장",
+        "hotApply": "저장하면 즉시 적용됩니다. 재시작이 필요하지 않습니다.",
+        "saved": "채널 설정을 저장했습니다",
+        "saveFailed": "채널 설정 저장 실패: {{message}}",
+        "test": "연결 테스트",
+        "testing": "테스트 중…",
+        "testOk": "연결이 확인되었습니다",
+        "testFailed": "연결 테스트 실패: {{message}}",
+        "testCodeOk": "공급자가 이 자격 증명을 수락했습니다.",
+        "testCodeInvalidCredentials": "공급자가 이 자격 증명을 거부했습니다.",
+        "testCodeNetwork": "공급자에 연결할 수 없습니다.",
+        "testCodeUnsupported": "이 채널은 연결 테스트를 지원하지 않습니다.",
+        "testedSavedConfig": "저장된 설정을 테스트했습니다.",
+        "testedDraftConfig": "양식의 현재 값(아직 저장되지 않음)을 테스트했습니다.",
+        "enable": "채널 사용",
+        "enableHint": "사용을 중지해도 저장된 자격 증명은 유지되며 언제든 다시 사용할 수 있습니다.",
+        "enabledToast": "채널을 사용하도록 설정했습니다",
+        "disabledToast": "채널을 사용 중지했습니다",
+        "enableFailed": "채널 사용 설정 실패: {{message}}",
+        "disableFailed": "채널 사용 중지 실패: {{message}}",
+        "enableRejected": "공급자가 자격 증명을 거부하여 채널을 사용하도록 설정하지 않았습니다.",
+        "enableRejectedDetail": "공급자 응답: {{detail}}",
+        "enableAnyway": "그래도 사용",
+        "enableAnywayHint": "그래도 사용하면 자격 증명 검사를 건너뛰므로 채널이 연결되지 않을 수 있습니다.",
+        "notWritable": "채널 설정이 YAML 파일({{path}})에 저장되어 있어 웹 UI에서 편집할 수 없습니다. 자격 증명을 변경하려면 해당 파일을 직접 편집하세요.",
+        "notWritableChip": "읽기 전용(YAML)",
+        "sdkMissing": "런타임 SDK가 설치되지 않음 — {{hint}}",
+        "sdkMissingNoHint": "런타임 SDK가 설치되어 있지 않습니다. 설정은 가능하지만 시작하지 못할 수 있습니다.",
+        "noFields": "이 채널에는 구성할 수 있는 필드가 없습니다.",
+        "loadFailed": "채널 설정을 불러오지 못했습니다."
+      },
+      "fields": {
+        "dingtalk": {
+          "client_id": {
+            "label": "Client ID(AppKey)",
+            "help": "DingTalk 개발자 콘솔의 자격 증명 페이지에 있는 앱 AppKey입니다."
+          },
+          "client_secret": {
+            "label": "Client Secret(AppSecret)",
+            "help": "앱의 AppSecret입니다. 서버에 저장되며 브라우저로 다시 전송되지 않습니다."
+          },
+          "allow_from": {
+            "label": "허용된 발신자",
+            "help": "에이전트와 대화할 수 있는 DingTalk 발신자 ID 허용 목록입니다(\"*\"는 모두 허용). 페어링되지 않은 발신자는 DM으로 페어링 코드를 받습니다."
+          },
+          "allow_remote_media_redirects": {
+            "label": "미디어 리디렉션 허용",
+            "help": "메시지 미디어를 내려받을 때 공급자 리디렉션을 따릅니다. 기본값은 꺼짐입니다."
+          },
+          "remote_media_redirect_allowed_hosts": {
+            "label": "허용된 리디렉션 호스트",
+            "help": "미디어 리디렉션을 켰을 때 허용할 호스트입니다. 비어 있으면 모든 교차 호스트 리디렉션이 차단됩니다."
+          },
+          "group_user_isolation": {
+            "label": "그룹에서 사용자별 세션 분리",
+            "help": "그룹 채팅의 각 멤버에게 별도의 에이전트 세션을 제공합니다."
+          },
+          "force_ipv4": {
+            "label": "IPv4 강제",
+            "help": "DingTalk API 호출을 IPv4에 바인딩합니다. 발신 IP 화이트리스트를 사용 중이고 IPv6 접두사는 자주 바뀌지만 IPv4는 안정적일 때 활성화하세요."
+          }
+        },
+        "qq": {
+          "app_id": {
+            "label": "AppID",
+            "help": "QQ 오픈 플랫폼(q.qq.com) 앱 설정에 있는 봇의 AppID입니다."
+          },
+          "secret": {
+            "label": "AppSecret",
+            "help": "봇의 AppSecret입니다. 서버에 저장되며 브라우저로 다시 전송되지 않습니다."
+          },
+          "allow_from": {
+            "label": "허용된 발신자",
+            "help": "에이전트와 대화할 수 있는 QQ 발신자 openid 허용 목록입니다(\"*\"는 모두 허용). 페어링되지 않은 발신자는 DM으로 페어링 코드를 받습니다."
+          },
+          "msg_format": {
+            "label": "메시지 형식",
+            "help": "응답 형식: plain 또는 markdown."
+          },
+          "ack_message": {
+            "label": "확인 메시지",
+            "help": "메시지가 도착했을 때 즉시 보내는 확인 응답입니다. 비워 두면 전송하지 않습니다."
+          },
+          "media_dir": {
+            "label": "미디어 디렉터리",
+            "help": "수신한 첨부 파일을 저장할 위치입니다. 비워 두면 ~/.vibe-trading/media/qq를 사용합니다."
+          },
+          "download_chunk_size": {
+            "label": "다운로드 청크 크기",
+            "help": "첨부 파일을 내려받을 때 청크당 바이트 수(기본 262144)."
+          },
+          "download_max_bytes": {
+            "label": "최대 다운로드 크기(바이트)",
+            "help": "첨부 파일 하나 다운로드의 안전 상한(기본 209715200 = 200 MB)."
+          }
+        },
+        "email": {
+          "consent_granted": {
+            "label": "동의 승인",
+            "help": "최상위 허용 스위치입니다. 여기서 명시적으로 동의해야만 이 채널이 메일을 읽고 보냅니다."
+          },
+          "imap_host": {
+            "label": "IMAP 호스트",
+            "help": "수신 메일 서버 호스트입니다(예: imap.gmail.com). 새 메일은 이 서버에서 IMAP으로 폴링합니다."
+          },
+          "imap_port": {
+            "label": "IMAP 포트",
+            "help": "수신 포트입니다(기본 993, SSL 사용)."
+          },
+          "imap_username": {
+            "label": "IMAP 사용자 이름",
+            "help": "IMAP 로그인에 사용하는 메일함 계정으로, 보통 전체 이메일 주소입니다."
+          },
+          "imap_password": {
+            "label": "IMAP 비밀번호",
+            "help": "IMAP용 메일함 비밀번호 또는 앱 비밀번호입니다. 서버 측에만 저장되며 브라우저로 반환되지 않습니다."
+          },
+          "imap_mailbox": {
+            "label": "IMAP 메일함",
+            "help": "새 메일을 폴링할 폴더입니다(기본 INBOX)."
+          },
+          "imap_use_ssl": {
+            "label": "IMAP SSL",
+            "help": "SSL로 IMAP에 연결합니다(기본 켜짐, 포트 993에 필요)."
+          },
+          "imap_use_tls": {
+            "label": "IMAP STARTTLS",
+            "help": "IMAP SSL이 꺼져 있으면 로그인 전에 STARTTLS로 연결을 암호화합니다(기본 켜짐, 포트 143의 표준). TLS를 지원하지 않는 서버를 신뢰할 수 있는 네트워크에서 쓸 때만 끄세요. 끄면 비밀번호가 평문으로 전송됩니다."
+          },
+          "smtp_host": {
+            "label": "SMTP 호스트",
+            "help": "발신 메일 서버 호스트입니다(예: smtp.gmail.com). 답장은 이 서버를 통해 전송됩니다."
+          },
+          "smtp_port": {
+            "label": "SMTP 포트",
+            "help": "발신 포트입니다(기본 587, STARTTLS 사용. 465는 암시적 SSL)."
+          },
+          "smtp_username": {
+            "label": "SMTP 사용자 이름",
+            "help": "SMTP 인증에 사용하는 계정으로, 보통 전체 이메일 주소입니다."
+          },
+          "smtp_password": {
+            "label": "SMTP 비밀번호",
+            "help": "SMTP용 비밀번호 또는 앱 비밀번호입니다. 서버 측에만 저장되며 브라우저로 반환되지 않습니다."
+          },
+          "smtp_use_tls": {
+            "label": "SMTP STARTTLS",
+            "help": "STARTTLS로 SMTP 연결을 암호화합니다(기본 켜짐, 포트 587의 표준). 실제로는 SMTP SSL과 함께 사용하지 않습니다."
+          },
+          "smtp_use_ssl": {
+            "label": "SMTP SSL",
+            "help": "암시적 TLS로 SMTP에 연결합니다(예: 포트 465, 기본 꺼짐). 실제로는 STARTTLS와 함께 사용하지 않습니다."
+          },
+          "verify_tls": {
+            "label": "TLS 인증서 검증",
+            "help": "메일 서버의 TLS 인증서와 호스트 이름을 검증합니다(권장). 자체 서명 또는 내부 CA 서버인 경우에만 끄세요."
+          },
+          "from_address": {
+            "label": "보낸 사람 주소",
+            "help": "답장을 보낼 주소입니다. 비워 두면 SMTP 사용자 이름을 사용합니다."
+          },
+          "auto_reply_enabled": {
+            "label": "자동 답장",
+            "help": "수신 메일에 자동으로 답장합니다. 에이전트가 시작하는 발신에는 영향을 주지 않습니다."
+          },
+          "poll_interval_seconds": {
+            "label": "폴링 간격(초)",
+            "help": "IMAP 메일함에서 새 메일을 확인하는 주기입니다(기본 30, 최소 5)."
+          },
+          "mark_seen": {
+            "label": "읽음으로 표시",
+            "help": "처리한 메일을 메일함에서 읽음으로 표시합니다."
+          },
+          "post_action": {
+            "label": "처리 후 동작",
+            "help": "처리한 메일의 처리 방식: delete(삭제), move(다른 메일함으로 이동), 비워 두면 그대로 유지."
+          },
+          "post_action_move_mailbox": {
+            "label": "이동할 메일함",
+            "help": "‘처리 후 동작’이 move일 때 사용할 대상 메일함입니다."
+          },
+          "post_action_expunge": {
+            "label": "삭제 후 expunge",
+            "help": "삭제한 메일에 삭제 플래그를 남기지 않고 완전히 제거합니다."
+          },
+          "post_action_ignore_skipped": {
+            "label": "본인·필터 메일 제외",
+            "help": "건너뛴 메일(본인이 보낸 메일과 허용 목록에서 걸러진 발신자)에는 처리 후 동작을 적용하지 않습니다(기본 켜짐)."
+          },
+          "max_body_chars": {
+            "label": "본문 최대 문자 수",
+            "help": "메일 본문을 이 문자 수로 잘라냅니다(기본 12000)."
+          },
+          "subject_prefix": {
+            "label": "답장 제목 접두사",
+            "help": "답장 제목 앞에 붙일 접두사입니다(기본 \"Re: \")."
+          },
+          "allow_from": {
+            "label": "허용 발신자",
+            "help": "에이전트와 대화할 수 있는 이메일 주소 허용 목록입니다(선택, \"*\"는 모든 사람 허용). 페어링되지 않은 발신자에게는 답장으로 페어링 코드가 전송됩니다."
+          },
+          "verify_dkim": {
+            "label": "DKIM 검증",
+            "help": "Authentication-Results 헤더에 dkim=pass를 요구합니다. DKIM과 SPF를 모두 끄면 위조된 From 헤더를 허용하게 됩니다."
+          },
+          "verify_spf": {
+            "label": "SPF 검증",
+            "help": "Authentication-Results 헤더에 spf=pass를 요구합니다. DKIM과 SPF를 모두 끄면 위조된 From 헤더를 허용하게 됩니다."
+          },
+          "allowed_attachment_types": {
+            "label": "허용 첨부 유형",
+            "help": "수신 첨부 파일의 MIME 허용 목록입니다(예: application/pdf, image/*). 비워 두면 첨부가 비활성화됩니다."
+          },
+          "max_attachment_size": {
+            "label": "첨부 크기 상한(바이트)",
+            "help": "첨부 파일 하나의 최대 바이트 수입니다(기본 2000000 = 2 MB)."
+          },
+          "max_attachments_per_email": {
+            "label": "메일당 첨부 수 상한",
+            "help": "메일 한 통에서 허용하는 첨부 파일 수입니다(기본 5)."
+          }
+        },
+        "websocket": {
+          "host": {
+            "label": "바인드 호스트",
+            "help": "WebSocket 서버가 바인드할 로컬 주소입니다(기본 127.0.0.1, 로컬 전용). 0.0.0.0 또는 :: 같은 와일드카드 호스트는 모든 인터페이스에 서버를 노출하므로 토큰이나 토큰 발급 시크릿이 없으면 거부됩니다."
+          },
+          "port": {
+            "label": "바인드 포트",
+            "help": "WebSocket 서버가 수신 대기할 로컬 포트입니다(기본 8765). Unix 소켓 경로를 설정하면 무시됩니다."
+          },
+          "unix_socket_path": {
+            "label": "Unix 소켓 경로",
+            "help": "선택적 절대 경로입니다. 설정하면 호스트와 포트 대신 이 Unix 소켓에서 수신 대기합니다."
+          },
+          "path": {
+            "label": "업그레이드 경로",
+            "help": "클라이언트가 연결하는 WebSocket 업그레이드 경로입니다(기본 /). \"/\"로 시작해야 합니다."
+          },
+          "token": {
+            "label": "정적 토큰",
+            "help": "핸드셰이크 시 token 쿼리 파라미터로 확인하는 공유 시크릿입니다. 서버 측에만 저장되며 브라우저로 반환되지 않습니다."
+          },
+          "token_issue_path": {
+            "label": "토큰 발급 경로",
+            "help": "단기 일회용 토큰을 JSON으로 발급하는 HTTP GET 경로입니다. 업그레이드 경로와 달라야 합니다."
+          },
+          "token_issue_secret": {
+            "label": "토큰 발급 시크릿",
+            "help": "토큰 발급 경로가 요구하는 Bearer 시크릿입니다(Authorization: Bearer 또는 X-Vibe-Trading-Auth). 서버 측에만 저장되며 브라우저로 반환되지 않습니다."
+          },
+          "token_ttl_s": {
+            "label": "발급 토큰 TTL(초)",
+            "help": "토큰 발급 경로가 발급한 토큰의 유효 시간(초)입니다(30–86400, 기본 300)."
+          },
+          "websocket_requires_token": {
+            "label": "토큰 필수",
+            "help": "유효한 정적 토큰이나 발급된 토큰이 없는 핸드셰이크를 거부합니다(기본 켜짐)."
+          },
+          "allow_from": {
+            "label": "허용 클라이언트",
+            "help": "연결을 허용할 클라이언트 ID 허용 목록입니다(선택, \"*\"는 모든 클라이언트 허용, 기본)."
+          },
+          "streaming": {
+            "label": "출력 스트리밍",
+            "help": "모델 출력 델타를 생성되는 즉시 연결된 클라이언트로 전송합니다."
+          },
+          "max_message_bytes": {
+            "label": "메시지 상한(바이트)",
+            "help": "허용하는 수신 프레임의 최대 바이트 수입니다(기본 37748736, 범위 1024–41943040)."
+          },
+          "ping_interval_s": {
+            "label": "Ping 간격(초)",
+            "help": "연결 유지 ping을 보내는 간격(초)입니다(5–300, 기본 20)."
+          },
+          "ping_timeout_s": {
+            "label": "Ping 타임아웃(초)",
+            "help": "ping 응답을 기다리는 시간(초)입니다. 초과하면 연결을 끊습니다(5–300, 기본 20)."
+          },
+          "ssl_certfile": {
+            "label": "TLS 인증서 경로",
+            "help": "WSS용 서버의 PEM 인증서 경로입니다. 인증서와 키를 모두 설정하거나 모두 비워 두세요. 업로드 자료가 아니라 서버의 파일 경로입니다."
+          },
+          "ssl_keyfile": {
+            "label": "TLS 키 경로",
+            "help": "WSS용 서버의 PEM 개인 키 경로입니다. 인증서와 키를 모두 설정하거나 모두 비워 두세요. 업로드 자료가 아니라 서버의 파일 경로입니다."
+          }
+        }
+      },
+      "guides": {
+        "dingtalk": {
+          "title": "DingTalk 설정 가이드",
+          "intro": "DingTalk 봇은 Stream 모드를 사용하므로 공개 콜백 URL이 필요하지 않습니다.",
+          "step1": "DingTalk 개발자 콘솔(open-dev.dingtalk.com)에서 앱을 만듭니다.",
+          "step2": "앱에 봇 기능을 추가하고 Stream 모드를 사용 설정합니다.",
+          "step3": "앱의 AppKey를 Client ID에, AppSecret을 Client Secret에 붙여 넣습니다.",
+          "step4": "앱을 게시하여 조직에서 사용할 수 있게 합니다.",
+          "step5": "여기로 돌아와 '연결 테스트'를 클릭한 다음 채널을 사용 설정합니다.",
+          "docsLabel": "DingTalk 개발자 콘솔 열기"
+        },
+        "qq": {
+          "title": "QQ 설정 가이드",
+          "intro": "QQ 봇은 공식 botpy SDK를 통해 WebSocket으로 연결되므로 공개 콜백 URL이 필요하지 않습니다.",
+          "step1": "QQ 오픈 플랫폼(q.qq.com)에 등록하고 봇을 만듭니다.",
+          "step2": "봇의 개발 설정 페이지에서 AppID와 AppSecret을 복사합니다.",
+          "step3": "위의 AppID 및 AppSecret 필드에 붙여 넣습니다.",
+          "step4": "플랫폼의 샌드박스/게시 규칙에 따라 봇을 QQ 그룹에 추가하거나 개인 채팅을 시작합니다.",
+          "step5": "여기로 돌아와 '연결 테스트'를 클릭한 다음 채널을 사용 설정합니다.",
+          "docsLabel": "QQ 오픈 플랫폼 열기"
+        },
+        "email": {
+          "title": "이메일 설정 가이드",
+          "intro": "이메일 채널은 수신은 IMAP 폴링, 답장은 SMTP로 처리하므로 공개 콜백 URL이 필요 없습니다.",
+          "step1": "메일 제공업체의 IMAP/SMTP 호스트와 포트를 확인합니다(보통 imap.<제공업체>의 993, smtp.<제공업체>의 587).",
+          "step2": "메일함 설정에서 IMAP과 SMTP를 활성화하고, 제공업체가 요구하면(Gmail, QQ 메일 등 2단계 인증 사용 시) 앱 비밀번호를 만듭니다.",
+          "step3": "위의 IMAP/SMTP 자격 증명을 입력하고 보낸 사람 주소를 설정한 뒤, 본인 주소를 ‘허용 발신자’에 추가합니다.",
+          "step4": "‘연결 테스트’를 클릭합니다. IMAP 로그인, 메일함 폴더, SMTP 로그인을 차례로 점검합니다.",
+          "step5": "‘동의 승인’을 체크하고 채널을 활성화하면 DKIM/SPF 검증을 통과한 발신자에게 자동 답장이 전달됩니다.",
+          "docsLabel": "Vibe-Trading 문서 열기"
+        },
+        "websocket": {
+          "title": "WebSocket 설정 가이드",
+          "intro": "WebSocket 채널은 자체 로컬 서버를 실행하고 클라이언트가 WebSocket 주소로 직접 연결하므로 공개 콜백 URL이 필요 없습니다.",
+          "step1": "바인드 주소를 선택합니다. 로컬 전용이면 127.0.0.1을 유지하고, 외부에 노출하려면 0.0.0.0 또는 ::를 설정합니다(와일드카드 호스트에는 토큰 또는 토큰 발급 시크릿이 필수).",
+          "step2": "정적 토큰을 설정하거나, 토큰 발급 경로와 Bearer 시크릿을 설정해 클라이언트가 단기 토큰을 받도록 합니다.",
+          "step3": "클라이언트는 ws://host:port/path?client_id=...&token=... 으로 연결합니다.",
+          "step4": "채널 실행 중에 저장하면 서버가 핫 스왑됩니다. 연결된 클라이언트(이 웹 UI 채팅 포함)는 잠시 끊겼다가 자동으로 다시 연결됩니다.",
+          "step5": "‘연결 테스트’를 클릭하면 SSL 인증서/키 자료와 주소 사용 가능 여부를 로컬에서 검증합니다.",
+          "docsLabel": "Vibe-Trading 문서 열기"
+        }
+      }
     },
     "generation": "생성 설정",
     "dataSourceSettings": "데이터 소스 설정",
@@ -444,6 +783,9 @@
         "kr_equity": "한국 주식",
         "ca_equity": "캐나다 주식",
         "vietnam_equity": "베트남 주식",
+        "ar_equity": "아르헨티나 주식",
+        "uk_equity": "영국 주식",
+        "index": "지수",
         "crypto": "암호화폐",
         "futures": "선물",
         "fund": "펀드",
@@ -452,7 +794,9 @@
       }
     },
     "tushareToken": "Tushare 토큰",
+    "gildataToken": "Gildata 토큰",
     "clearTushareToken": "저장된 Tushare 토큰 삭제",
+    "clearGildataToken": "저장된 Gildata 토큰 삭제",
     "saveDataSourceSettings": "데이터 소스 설정 저장",
     "baostock": "BaoStock",
     "loadLlmSettingsFailed": "LLM 설정 로드 실패: {{message}}",
@@ -484,7 +828,8 @@
     "oauth": "OAuth",
     "authentication": "인증",
     "apiKey": "API 키",
-    "tushareTokenDesc": "중국 A주·선물·펀드·거시 데이터에 사용됩니다. 설정하지 않으면 가능한 경우 AKShare로 대체됩니다."
+    "tushareTokenDesc": "중국 A주·선물·펀드·거시 데이터에 사용됩니다. 설정하지 않으면 가능한 경우 AKShare로 대체됩니다.",
+    "gildataTokenDesc": "선택 사항: 헝성쥐위안(Gildata) 중국 A주 데이터 소스. 설정하면 전방 조정 일봉으로 A주 폴백 체인 끝에 추가됩니다."
   },
   "qveris": {
     "title": "QVeris 도구 마켓플레이스",
@@ -597,7 +942,8 @@
       "failed": "실패",
       "steps": "{{count}}단계",
       "continue": "계속",
-      "reattach": "다시 연결"
+      "reattach": "다시 연결",
+      "checkingFigures": "답변 속 수치 확인 중({{round}}차)…"
     },
     "resumeConnector": "커넥터 재개",
     "resumeConnectorTitle": "킬 스위치를 해제하고 커넥터 활동을 재개",
@@ -609,6 +955,8 @@
     "runNotFound": "실행을 찾을 수 없음",
     "runNotFoundDesc": "실행 디렉터리가 제거되었거나 브라우저에 API 액세스가 설정되지 않았을 수 있습니다. 원격으로 액세스하는 경우 설정에서 API 인증 키가 설정되어 있는지 확인하세요.",
     "goBack": "뒤로",
+    "showFullPrompt": "전체 프롬프트 보기",
+    "showLessPrompt": "간략히 보기",
     "chart": "차트",
     "trades": "거래",
     "factor": "팩터 분석",
@@ -621,9 +969,11 @@
     "maxDrawdown": "최대 낙폭",
     "symbol": "심볼",
     "weight": "비중",
-    "rebalanceCount": "리밸런스 횟수",
-    "turnoverMean": "평균 회전율",
-    "turnoverMax": "최대 회전율",
+    "rebalanceCount": "목표 리밸런스 횟수(요청)",
+    "rebalanceExecuted": "실행된 리밸런스 수",
+    "rebalanceRealizedTurnover": "실현 리밸런스 회전율",
+    "turnoverMean": "평균 회전율(요청)",
+    "turnoverMax": "최대 회전율(요청)",
     "largestRebalance": "최대 리밸런스",
     "date": "날짜",
     "turnover": "회전율",
@@ -659,6 +1009,33 @@
     "reproducibility": "재현성",
     "metrics": "지표",
     "validationPayload": "검증",
+    "trust": {
+      "executionRecords": "실행 기록",
+      "executionDescription": "기록된 실행 단계와 입력 및 결과의 해시입니다.",
+      "noExecutionRecords": "이 실행의 실행 기록이 저장되지 않았습니다.",
+      "startedAt": "시작 (UTC)",
+      "endedAt": "종료 (UTC)",
+      "argsHash": "인수 SHA-256",
+      "resultHash": "결과 SHA-256",
+      "metricEvidence": "지표 근거",
+      "evidenceDescription": "저장된 지표 데이터에 대한 참조입니다. 체크섬은 기록된 파일을 식별하며, 이 화면에서는 별도로 검증하지 않습니다.",
+      "noMetricEvidence": "이 실행의 지표 근거가 기록되지 않았습니다.",
+      "metric": "지표",
+      "artifact": "산출물",
+      "column": "열",
+      "row": "데이터 행 (1부터 시작, 헤더 제외)",
+      "artifactHash": "산출물 SHA-256",
+      "tools": {
+        "backtest": "백테스트",
+        "load_data": "데이터 로드",
+        "generate_signals": "신호 생성"
+      },
+      "status": {
+        "ok": "완료",
+        "error": "실패",
+        "cancelled": "취소됨"
+      }
+    },
     "artifactChecksums": "아티팩트 체크섬",
     "path": "경로",
     "size": "크기",
@@ -666,6 +1043,8 @@
     "noBacktestSummary": "기록된 백테스트 요약이 없습니다.",
     "noReproducibilityHashes": "기록된 재현성 해시가 없습니다.",
     "noScalarMetrics": "기록된 스칼라 지표가 없습니다.",
+    "noStructuredMetrics": "기록된 구조화 지표가 없습니다.",
+    "structuredMetrics": "구조화된 지표",
     "noValidationPayload": "기록된 검증 페이로드가 없습니다.",
     "noArtifactChecksums": "기록된 아티팩트 체크섬이 없습니다.",
     "noCodeFiles": "코드 파일이 없습니다.",
@@ -733,6 +1112,9 @@
         "crypto": "암호화폐",
         "futures": "선물",
         "forex": "외환",
+        "ar_equity": "아르헨티나 주식",
+        "uk_equity": "영국 주식",
+        "vietnam_equity": "베트남 주식",
         "other": "기타"
       }
     },
@@ -1201,7 +1583,15 @@
     "maxPerOrder": "주문당 {{amount}} 이하",
     "expiresOn": "{{date}} 만료",
     "accountSummary": "{{broker}} · {{type}} 계정 · 자금 제공: {{fundedBy}}",
-    "adjustRequestMessage": "운용 권한 제안 \"{{label}}\"(옵션 {{ordinal}})에 대한 조정 요청: {{text}}"
+    "adjustRequestMessage": "운용 권한 제안 \"{{label}}\"(옵션 {{ordinal}})에 대한 조정 요청: {{text}}",
+    "accountLoading": "브로커 계좌를 불러오는 중…",
+    "accountLoadFailed": "브로커 계좌를 불러오지 못했습니다: {{error}}",
+    "accountLabel": "이 mandate로 거래할 계좌",
+    "accountChoose": "계좌 선택",
+    "accountDefault": " · 브로커 기본값",
+    "accountDeactivated": " · 비활성화됨",
+    "accountNotAgentic": " · 에이전트 거래 허용 안 됨",
+    "accountHint": "에이전트는 이 계좌에서만 거래합니다. 자동으로 선택되지 않습니다."
   },
   "messageBubble": {
     "elapsedTime": "총 응답 시간",
@@ -1399,6 +1789,8 @@
   },
   "runDashboard": {
     "eyebrow": "계량 리서치 · 백테스트",
+    "noBacktestData": "이 실행에는 표시할 백테스트 데이터가 없습니다",
+    "noBacktestDataStudioHint": "포트폴리오/리스크 분석으로 보입니다 — 수치는 Studio 탭에서 확인하세요.",
     "engine": "엔진",
     "portfolio": "포트폴리오",
     "systematicStrategy": "시스테매틱 전략",
@@ -1477,6 +1869,7 @@
       "errorLoad": "포트폴리오를 불러올 수 없습니다",
       "errorRefresh": "새로고침에 실패했습니다",
       "errorReconnect": "계좌 재연결에 실패했습니다",
+      "errorReconnectTimeout": "브라우저 인증 시간이 초과되었습니다. 다시 연결하고 브로커 인증을 신속히 완료하세요.",
       "errorSaveSettings": "포트폴리오 설정을 저장할 수 없습니다",
       "errorExport": "내보내기에 실패했습니다"
     },
@@ -1507,7 +1900,8 @@
       "failed": "읽지 못했습니다 — 합계에 포함되지 않음",
       "lastSuccess": "마지막으로 성공한 읽기 {{time}}",
       "noSuccess": "아직 성공한 읽기가 없습니다",
-      "reconnect": "다시 연결"
+      "reconnect": "다시 연결",
+      "retryRead": "다시 읽기"
     },
     "holdings": {
       "title": "보유 내역",
@@ -1549,6 +1943,11 @@
     "env": {
       "live": "실거래",
       "paper": "페이퍼"
+    },
+    "compatibility": {
+      "native": "전용 어댑터",
+      "contractTested": "계약 테스트 완료",
+      "experimental": "실험적"
     },
     "editor": {
       "title": "포트폴리오 계좌 관리",
@@ -1595,14 +1994,31 @@
       "codexBody": "Codex에 connector init을 실행시키고, 공식 문서를 보고 읽기 전용 어댑터를 구현한 뒤 validate를 통과시키고 install 하세요. 플러그인은 저장소 밖에 설치됩니다.",
       "readOnly": "읽기 전용",
       "credentialSaved": "저장됨",
+      "optional": "(선택 사항)",
+      "authType": "인증 방식",
+      "dependency": "로컬 종속성",
       "oauthNote": "OAuth를 사용합니다. 필요하면 재연결로 승인하세요.",
       "localNote": "자격 증명은 기존 로컬 커넥터 설정이 관리합니다.",
       "saveVault": "자격 증명 저장소에 저장",
       "savedVault": "자격 증명을 OS 저장소에 저장했습니다.",
       "test": "연결 테스트",
       "testOk": "{{label}} 연결이 정상입니다.",
+      "testFailed": "{{label}} 테스트 실패: {{error}}",
+      "unknownTestError": "커넥터가 알 수 없는 오류를 반환했습니다.",
       "delete": "삭제",
-      "configured": "필요한 자격 증명이 설정되었습니다"
+      "configured": "필요한 자격 증명이 설정되었습니다",
+      "accountTitle": "계좌",
+      "accountCurrent": "끝자리 ····{{last4}} 계좌를 읽습니다",
+      "accountNone": "선택된 계좌가 없습니다. 계좌를 선택하기 전까지 이 연결은 아무것도 읽지 않습니다.",
+      "accountLoad": "계좌 선택",
+      "accountChange": "계좌 변경",
+      "accountEmpty": "이 로그인으로 접근할 수 있는 계좌가 없습니다.",
+      "accountPicker": "이 로그인으로 접근할 수 있는 계좌",
+      "accountChoose": "계좌 선택",
+      "accountDefault": " · 브로커 기본값",
+      "accountDeactivated": " · 비활성화됨",
+      "accountSave": "이 계좌 사용",
+      "accountSaved": "계좌를 저장했습니다."
     }
   }
 }

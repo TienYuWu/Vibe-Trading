@@ -17,6 +17,7 @@ simulation rebuild. This keeps the numbers auditable and reproducible.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -33,7 +34,7 @@ from src.shadow_account.models import (
 )
 from src.shadow_account.storage import runs_dir
 from src.tools.trade_journal_parsers import parse_file, records_to_dataframe
-from src.tools.trade_journal_tool import pair_trades_fifo
+from src.tools.trade_journal_tool import build_frame_adjust, pair_trades_fifo
 
 logger = logging.getLogger(__name__)
 
@@ -266,11 +267,24 @@ def run_shadow_backtest(
     if headline_points:
         equity_curves["combined"] = headline_points
 
+    # Restate journal legs to one price caliber where the run's own adjusted
+    # frames cover the symbol; uncovered symbols stay raw (see #15).
+    adjust_frames: dict[str, pd.DataFrame] = {}
+    for currency, _, _, _ in group_results:
+        artifacts_dir = base_dir / currency / "artifacts"
+        if artifacts_dir.is_dir():
+            for ohlcv_csv in artifacts_dir.glob("ohlcv_*.csv"):
+                symbol = ohlcv_csv.stem.removeprefix("ohlcv_")
+                frame = pd.read_csv(ohlcv_csv, index_col=0, parse_dates=True)
+                adjust_frames.setdefault(symbol, frame)
     attribution, shadow_pnl, real_pnl = _attribution_or_zero(
         profile=profile,
         journal_path=journal_path,
         combined=combined,
         initial_capital=initial_capital,
+        pool_currency=headline_currency,
+        adjust=build_frame_adjust(adjust_frames) if adjust_frames else None,
+        covered_symbols=frozenset(adjust_frames),
     )
 
     result = ShadowBacktestResult(
@@ -283,13 +297,35 @@ def run_shadow_backtest(
         real_total_pnl=real_pnl,
         delta_pnl=round(shadow_pnl - real_pnl, 2) if shadow_pnl is not None else None,
     )
-    _cache_result(base_dir, result)
+    _cache_result(
+        base_dir, result,
+        profile=profile, window_start=window_start, window_end=window_end,
+    )
     return result
 
 
-def load_cached_result(shadow_id: str) -> ShadowBacktestResult | None:
-    """Load the last cached backtest result for a shadow, if any."""
-    cache_path = runs_dir(shadow_id) / "shadow_result.json"
+
+def _cache_key(profile: ShadowProfile, window_start: str, window_end: str) -> str:
+    """Digest for the result cache: window plus the journal hash the profile
+    was extracted from, so a re-render with a different window or an edited
+    journal cannot silently reuse a stale run."""
+    raw = f"{window_start}|{window_end}|{profile.journal_hash}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def load_cached_result(
+    profile: ShadowProfile,
+    *,
+    window_start: str,
+    window_end: str,
+) -> ShadowBacktestResult | None:
+    """Load the cached backtest result matching this window and journal.
+
+    The cache is keyed by shadow + run parameters; a different window or a
+    re-extracted (re-hashed) journal deliberately misses instead of serving a
+    stale run.
+    """
+    cache_path = runs_dir(profile.shadow_id) / f"shadow_result_{_cache_key(profile, window_start, window_end)}.json"
     if not cache_path.exists():
         return None
     try:
@@ -319,13 +355,20 @@ def load_cached_result(shadow_id: str) -> ShadowBacktestResult | None:
     )
 
 
-def _cache_result(run_dir: Path, result: ShadowBacktestResult) -> None:
+def _cache_result(
+    run_dir: Path,
+    result: ShadowBacktestResult,
+    *,
+    profile: ShadowProfile,
+    window_start: str,
+    window_end: str,
+) -> None:
     """Persist a ShadowBacktestResult so downstream tools don't re-backtest."""
     from dataclasses import asdict as _asdict
 
     payload = _asdict(result)
     try:
-        (run_dir / "shadow_result.json").write_text(
+        (run_dir / f"shadow_result_{_cache_key(profile, window_start, window_end)}.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
@@ -494,6 +537,9 @@ def _attribution_or_zero(
     journal_path: str | Path | None,
     combined: dict[str, float],
     initial_capital: float,
+    pool_currency: str | None = None,
+    adjust=None,
+    covered_symbols: frozenset[str] = frozenset(),
 ) -> tuple[AttributionBreakdown, float | None, float]:
     """Compute attribution if the journal is available, else return zeros."""
     shadow_pnl = _shadow_pnl_from_metrics(combined, initial_capital)
@@ -508,7 +554,7 @@ def _attribution_or_zero(
     try:
         _, records = parse_file(path)
         trades_df = records_to_dataframe(records)
-        roundtrips = pair_trades_fifo(trades_df)
+        roundtrips = pair_trades_fifo(trades_df, adjust=adjust)
     except Exception as exc:
         logger.warning("Attribution skipped — journal parse failed: %s", exc)
         return _zero_attribution(), shadow_pnl, 0.0
@@ -516,7 +562,44 @@ def _attribution_or_zero(
     if not roundtrips:
         return _zero_attribution(), shadow_pnl, 0.0
 
-    return _compute_attribution(profile=profile, roundtrips=roundtrips, shadow_pnl=shadow_pnl)
+    dividend_cash = _dividend_cash(
+        trades_df, covered_symbols=covered_symbols, pool_currency=pool_currency,
+    )
+    return _compute_attribution(
+        profile=profile,
+        roundtrips=roundtrips,
+        shadow_pnl=shadow_pnl,
+        pool_currency=pool_currency,
+        extra_real_pnl=dividend_cash,
+    )
+
+
+def _dividend_cash(
+    trades_df: pd.DataFrame,
+    *,
+    covered_symbols: frozenset[str],
+    pool_currency: str | None,
+) -> float:
+    """Sum cash-dividend rows the adjusted frames do not already capture.
+
+    When the run's adjusted frames cover a symbol, the dividend is embedded in
+    the adjusted-close caliber the roundtrip legs are restated through (#1311),
+    so booking the cash as well would count it twice; only dividends on
+    uncovered symbols add to real PnL here. Rows settling in a currency other
+    than the pool's are excluded exactly like the roundtrips are (#14).
+    """
+    if trades_df.empty or "side" not in trades_df.columns:
+        return 0.0
+    total = 0.0
+    for row in trades_df.itertuples(index=False):
+        if row.side != "dividend":
+            continue
+        if row.symbol in covered_symbols:
+            continue
+        if pool_currency is not None and code_currency(row.symbol) != pool_currency:
+            continue
+        total += float(row.amount)
+    return total
 
 
 def _zero_attribution() -> AttributionBreakdown:
@@ -535,6 +618,8 @@ def _compute_attribution(
     profile: ShadowProfile,
     roundtrips: list[dict[str, Any]],
     shadow_pnl: float,
+    pool_currency: str | None = None,
+    extra_real_pnl: float = 0.0,
 ) -> tuple[AttributionBreakdown, float, float]:
     """Attribute the delta between user's real PnL and shadow PnL.
 
@@ -553,36 +638,65 @@ def _compute_attribution(
 
     ``counterfactual_trades`` lists the top-5 |impact| roundtrips for
     Section 6 of the report.
+
+    ``pool_currency`` restricts the comparison to the shadow pool's currency:
+    the pool is single-currency, so roundtrips settling in other currencies
+    are excluded from ``real_pnl`` and counted in
+    ``AttributionBreakdown.excluded_currencies`` instead of being summed
+    against it (#14).
+
+    ``extra_real_pnl`` carries real cash the roundtrips do not capture (cash
+    dividends on symbols the run's adjusted frames do not cover). It is added
+    into ``real_pnl`` so the ``missed`` residual stays balanced.
     """
     rule_hold_lo, rule_hold_hi = _aggregate_holding_range(profile)
     noise = 0.0
     early = 0.0
     late = 0.0
-    real_pnl = 0.0
+    already_explained: set[int] = set()
+    excluded_currencies: dict[str, int] = {}
+    pool_roundtrips = [
+        rt
+        for rt in roundtrips
+        if pool_currency is None or code_currency(rt["symbol"]) == pool_currency
+    ]
+    if pool_currency is not None:
+        for rt in roundtrips:
+            currency = code_currency(rt["symbol"])
+            if currency != pool_currency:
+                excluded_currencies[currency] = excluded_currencies.get(currency, 0) + 1
+    real_pnl = float(extra_real_pnl)
     counterfactuals: list[dict[str, Any]] = []
 
-    for rt in roundtrips:
+    for rt in pool_roundtrips:
         pnl = float(rt["pnl"])
         real_pnl += pnl
         hold = float(rt["hold_days"])
         within_rule = rule_hold_lo <= hold <= rule_hold_hi
         impact = 0.0
         reason = ""
+        # Buckets are mutually exclusive (#17): a too-short winner belongs to
+        # early-exit and a too-long loser to late-exit; only the remaining
+        # out-of-range trades count as rule-violation noise. Without the
+        # split, those trades landed in both noise and early/late and
+        # `explained` summed them twice.
         if not within_rule:
-            noise += -pnl
-            impact += -pnl
-            reason = "rule_violation"
-        if pnl > 0 and hold < rule_hold_lo:
-            shortfall = pnl * max(0.0, (rule_hold_lo - hold) / max(rule_hold_lo, 1))
-            early += shortfall
-            impact += shortfall
-            reason = reason or "early_exit"
-        if pnl < 0 and hold > rule_hold_hi:
-            excess = -pnl * max(0.0, (hold - rule_hold_hi) / max(rule_hold_hi, 1))
-            late += excess
-            impact += excess
-            reason = reason or "late_exit"
+            if pnl > 0 and hold < rule_hold_lo:
+                shortfall = pnl * max(0.0, (rule_hold_lo - hold) / max(rule_hold_lo, 1))
+                early += shortfall
+                impact += shortfall
+                reason = "early_exit"
+            elif pnl < 0 and hold > rule_hold_hi:
+                excess = -pnl * max(0.0, (hold - rule_hold_hi) / max(rule_hold_hi, 1))
+                late += excess
+                impact += excess
+                reason = "late_exit"
+            else:
+                noise += -pnl
+                impact += -pnl
+                reason = "rule_violation"
         if impact != 0.0:
+            already_explained.add(id(rt))
             counterfactuals.append({
                 "symbol": rt["symbol"],
                 "buy_dt": str(rt["buy_dt"]),
@@ -593,7 +707,9 @@ def _compute_attribution(
                 "reason": reason,
             })
 
-    overtrading = _overtrading_pnl(profile=profile, roundtrips=roundtrips)
+    overtrading = _overtrading_pnl(
+        profile=profile, roundtrips=pool_roundtrips, already_explained=already_explained
+    )
     explained = noise + early + late + overtrading
     missed = round(shadow_pnl - real_pnl - explained, 2)
 
@@ -608,6 +724,7 @@ def _compute_attribution(
             late_exit_pnl=round(late, 2),
             overtrading_pnl=round(overtrading, 2),
             counterfactual_trades=top5,
+            excluded_currencies=excluded_currencies,
         ),
         round(shadow_pnl, 2),
         round(real_pnl, 2),
@@ -627,6 +744,7 @@ def _overtrading_pnl(
     *,
     profile: ShadowProfile,
     roundtrips: list[dict[str, Any]],
+    already_explained: set[int] = frozenset(),
 ) -> float:
     """Excess-frequency PnL: trades beyond the shadow's expected budget.
 
@@ -634,21 +752,34 @@ def _overtrading_pnl(
     compare against the user's actual roundtrip count over the same span.
     Excess trades' PnL is totaled with a negative sign (shadow would've
     skipped them, so real PnL — positive or negative — is "noise").
+
+    ``already_explained`` holds ``id()`` of roundtrips the caller already
+    booked into noise/early/late (#17's mutual-exclusivity invariant): those
+    trades' PnL already explains their gap from shadow behaviour, so they
+    are excluded from the "extra" candidates here to avoid double-counting
+    the same trade in two buckets.
     """
     if not roundtrips:
         return 0.0
     median_hold, _ = profile.typical_holding_days
     if median_hold <= 0:
         return 0.0
+    # roundtrips is appended in sell-chronological order (pair_trades_fifo
+    # closes each position as its sell/cover row is processed), so [-1]'s
+    # sell_dt is the true latest sell, but [0]'s buy_dt is only the buy date
+    # of whichever roundtrip happened to sell first -- not the true earliest
+    # buy. A long hold mixed with short trades understates the span.
     span_days = (
-        pd.Timestamp(roundtrips[-1]["sell_dt"]) - pd.Timestamp(roundtrips[0]["buy_dt"])
+        max(pd.Timestamp(rt["sell_dt"]) for rt in roundtrips)
+        - min(pd.Timestamp(rt["buy_dt"]) for rt in roundtrips)
     ).total_seconds() / 86400.0
     expected = max(1.0, span_days / max(2 * median_hold, 1.0))
     actual = len(roundtrips)
     if actual <= expected:
         return 0.0
     # Penalize the cheapest (lowest |pnl|) extras — those look like noise.
-    extras = sorted(roundtrips, key=lambda rt: abs(float(rt["pnl"])))
+    candidates = [rt for rt in roundtrips if id(rt) not in already_explained]
+    extras = sorted(candidates, key=lambda rt: abs(float(rt["pnl"])))
     extra_count = int(actual - expected)
     extra_pnl = sum(float(rt["pnl"]) for rt in extras[:extra_count])
     return -extra_pnl

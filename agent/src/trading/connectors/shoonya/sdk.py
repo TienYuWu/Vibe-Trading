@@ -40,6 +40,10 @@ SHOONYA_API_URL = "https://api.shoonya.com/NorenWClientTP"
 #: exposes no runtime paper/live discriminator (TOTP login reaches the same real
 #: account), so — following the Longbridge precedent — the connector is
 #: structurally capped at paper and never opens a live order path.
+#: Prefix of every order id the local paper simulator issues. ``cancel_order``
+#: refuses any other id, because only these orders exist in the simulation.
+_PAPER_ORDER_PREFIX = "PAPER-"
+
 _PAPER_ONLY_ERROR = (
     "Shoonya connector is paper-only: it exposes no runtime paper/live "
     "discriminator, so live order placement is not supported. Use a "
@@ -475,7 +479,7 @@ def place_order(
     # Paper-only: simulate locally (Shoonya has no sandbox).
     return {
         "status": "ok",
-        "order_id": f"PAPER-{clean_symbol}-{buy_or_sell}-{qty}",
+        "order_id": f"{_PAPER_ORDER_PREFIX}{clean_symbol}-{buy_or_sell}-{qty}",
         "symbol": clean_symbol,
         "side": side_token.lower(),
         "profile": cfg.profile,
@@ -506,6 +510,17 @@ def cancel_order(
     clean_id = str(order_id or "").strip()
     if not clean_id:
         return {"status": "error", "error": "order_id is required"}
+    if not clean_id.startswith(_PAPER_ORDER_PREFIX):
+        # The paper profile reads the real account, so a live order's id can
+        # arrive here; acknowledging it would report a cancel that never
+        # happened while the real order keeps working.
+        return {
+            "status": "error",
+            "error": (
+                f"order {clean_id!r} was not issued by this paper simulator, so it "
+                "cannot be cancelled here; cancel a real order with the broker"
+            ),
+        }
 
     return {
         "status": "ok",

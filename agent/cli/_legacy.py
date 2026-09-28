@@ -435,7 +435,6 @@ def _provider_key_env(provider: str | None) -> str | None:
     """Return the credential environment variable for a provider."""
     return {
         "openrouter": "OPENROUTER_API_KEY",
-        "requesty": "REQUESTY_API_KEY",
         "openai": "OPENAI_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
         "nvidia": "NVIDIA_API_KEY",
@@ -460,7 +459,6 @@ def _provider_base_env(provider: str | None) -> str | None:
     """Return the base URL environment variable for a provider."""
     return {
         "openrouter": "OPENROUTER_BASE_URL",
-        "requesty": "REQUESTY_BASE_URL",
         "openai": "OPENAI_BASE_URL",
         "openai-codex": "OPENAI_CODEX_BASE_URL",
         "deepseek": "DEEPSEEK_BASE_URL",
@@ -4264,9 +4262,18 @@ def cmd_portfolio_sources(service: Any | None = None) -> int:
     table.add_column("Transport")
     table.add_column("Credentials", justify="center")
     for row in rows:
+        connection_cell = (
+            f"[cyan]{rich_escape(str(row.get('connection_id') or row.get('id')))}[/cyan]"
+            f"\n[dim]{rich_escape(str(row.get('label') or ''))}[/dim]"
+        )
+        account_ref = str(row.get("account_ref") or "")
+        if account_ref:
+            connection_cell += f"\n[dim]account ····{rich_escape(account_ref[-4:])}[/dim]"
+        elif row.get("account_selection_required"):
+            connection_cell += "\n[yellow]no account selected[/yellow]"
         table.add_row(
             "[green]*[/green]" if row.get("selected") else "",
-            f"[cyan]{rich_escape(str(row.get('connection_id') or row.get('id')))}[/cyan]\n[dim]{rich_escape(str(row.get('label') or ''))}[/dim]",
+            connection_cell,
             rich_escape(str(row.get("connector") or "")),
             rich_escape(str(row.get("environment") or "")),
             rich_escape(str(row.get("transport") or "")),
@@ -4365,6 +4372,7 @@ def cmd_connector_configure(
 def cmd_connector_check(
     profile_id: Optional[str] = None,
     *,
+    connection_id: str | None = None,
     host: str | None = None,
     port: int | None = None,
     client_id: int | None = None,
@@ -4375,7 +4383,15 @@ def cmd_connector_check(
 
     try:
         profile = _selected_profile_or(profile_id)
-        report = check_connection(profile.id, host=host, port=port, client_id=client_id, account=account)
+        options = {
+            "host": host,
+            "port": port,
+            "client_id": client_id,
+            "account": account,
+        }
+        if connection_id is not None:
+            options["connection_id"] = connection_id
+        report = check_connection(profile.id, **options)
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Connector check failed:[/red] {exc}")
         return EXIT_RUN_FAILED
@@ -4440,6 +4456,162 @@ def cmd_connector_check(
     return EXIT_SUCCESS
 
 
+def cmd_connector_setup(
+    profile_id: str,
+    *,
+    connection_id: str | None = None,
+    label: str | None = None,
+    skip_check: bool = False,
+    account: str | None = None,
+) -> int:
+    """Create a local read-only connection and collect secrets outside AI prompts.
+
+    Args:
+        profile_id: Read-only portfolio profile to connect through.
+        connection_id: Local id; defaults to ``<connector>-<environment>``.
+        label: Display name; defaults to the profile label.
+        skip_check: Skip the connectivity check (and, for an account-scoped
+            profile, the account selection that needs the broker).
+        account: Account to scope an account-scoped connection to; without it
+            the user picks from the broker's account list.
+
+    Returns:
+        The process exit code.
+    """
+    from src.trading.connections import (
+        ConnectionStore,
+        credential_field_catalog,
+        is_portfolio_connection_profile,
+        requires_account_selection,
+    )
+    from src.trading.profiles import profile_by_id
+    from src.trading.service import check_connection
+
+    try:
+        profile = profile_by_id(profile_id)
+        if not is_portfolio_connection_profile(profile):
+            raise ValueError(f"{profile.id} is not a read-only portfolio profile")
+        local_id = str(connection_id or f"{profile.connector}-{profile.environment}").strip().lower()
+        store = ConnectionStore()
+        connection = store.ensure(local_id, profile.id, label or profile.label)
+        fields = credential_field_catalog(profile.id)
+        names = [str(field["name"]) for field in fields]
+        status = store.credentials.status(connection.id, names) if names else {}
+        values: dict[str, str] = {}
+        for field in fields:
+            name = str(field["name"])
+            required = bool(field.get("required", True))
+            while True:
+                saved = bool(status.get(name))
+                suffix = " [already saved; Enter keeps it]" if saved else ""
+                value = Prompt.ask(
+                    f"{field.get('label') or name}{suffix}",
+                    password=bool(field.get("secret", True)),
+                    default="",
+                    show_default=False,
+                )
+                if value:
+                    values[name] = value
+                    break
+                if saved or not required:
+                    break
+                console.print(f"[yellow]{field.get('label') or name} is required.[/yellow]")
+        if values:
+            store.credentials.save(connection.id, values)
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]Connector setup failed:[/red] {rich_escape(str(exc))}")
+        return EXIT_USAGE_ERROR
+
+    console.print(
+        f"[green]Local read-only connection ready[/green] "
+        f"{connection.id} [dim]({connection.profile_id})[/dim]"
+    )
+    needs_account = requires_account_selection(profile)
+    if skip_check:
+        if needs_account and not connection.account_ref:
+            console.print(
+                f"[yellow]Select the account this connection reads:[/yellow] "
+                f"vibe-trading connector select-account {connection.id}"
+            )
+        return EXIT_SUCCESS
+    try:
+        report = check_connection(profile.id, connection_id=connection.id)
+    except Exception as exc:  # noqa: BLE001 - return an actionable diagnostic
+        console.print(f"[red]Connection test failed:[/red] {rich_escape(str(exc))}")
+        return EXIT_RUN_FAILED
+    if report.get("status") != "ok":
+        console.print(
+            f"[red]Connection test failed:[/red] "
+            f"{rich_escape(str(report.get('error') or report.get('status')))}"
+        )
+        return EXIT_RUN_FAILED
+    console.print("[green]Connection test passed.[/green]")
+    if needs_account and (account is not None or not connection.account_ref):
+        return cmd_connector_select_account(connection.id, account=account)
+    return EXIT_SUCCESS
+
+
+def cmd_connector_select_account(
+    connection_id: str,
+    *,
+    account: str | None = None,
+    clear: bool = False,
+) -> int:
+    """Scope an account-scoped connection to one account from the broker's list.
+
+    There is no default: without ``account`` the user picks from the list, and
+    an account the broker does not list is refused.
+
+    Args:
+        connection_id: Connection to update.
+        account: Account reference to select; prompts when omitted.
+        clear: Remove the selection instead.
+
+    Returns:
+        The process exit code.
+    """
+    from src.trading.accounts import AccountListUnavailable, choose_account, connection_accounts
+    from src.trading.connections import ConnectionStore
+
+    store = ConnectionStore()
+    try:
+        connection = store.get(connection_id)
+        if clear:
+            store.select_account(connection.id, "")
+            console.print(f"[green]Cleared the account selection of[/green] {connection.id}")
+            return EXIT_SUCCESS
+        choices = connection_accounts(connection)
+        if account is None:
+            usable = [row for row in choices if not row.get("deactivated")]
+            if not usable:
+                raise ValueError("this login reaches no active account")
+            table = Table(title="Accounts", box=box.SIMPLE_HEAVY)
+            table.add_column("#", justify="right")
+            table.add_column("Account")
+            table.add_column("Broker default", justify="center")
+            table.add_column("Agentic trading", justify="center")
+            for index, row in enumerate(usable, start=1):
+                table.add_row(
+                    str(index),
+                    rich_escape(str(row.get("label") or "")),
+                    "yes" if row.get("is_default") else "",
+                    "allowed" if row.get("agentic_allowed") else "[dim]not allowed[/dim]",
+                )
+            console.print(table)
+            pick = Prompt.ask("Account", choices=[str(index) for index in range(1, len(usable) + 1)])
+            account = str(usable[int(pick) - 1]["account_ref"])
+        chosen = choose_account(choices, account.strip())
+        store.select_account(connection.id, str(chosen["account_ref"]))
+    except AccountListUnavailable as exc:
+        console.print(f"[red]Could not read the account list:[/red] {rich_escape(str(exc))}")
+        return EXIT_RUN_FAILED
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]Account selection failed:[/red] {rich_escape(str(exc))}")
+        return EXIT_USAGE_ERROR
+    console.print(f"[green]{connection.id} now reads[/green] {rich_escape(str(chosen.get('label') or ''))}")
+    return EXIT_SUCCESS
+
+
 def _first_present(row: dict[str, Any], *keys: str) -> Any:
     """Return the first key whose value is not None (0/'' are kept), else None.
 
@@ -4456,8 +4628,32 @@ def _first_present(row: dict[str, Any], *keys: str) -> Any:
 
 
 def _print_connector_balances(result: dict[str, Any]) -> int:
-    """Render the multi-currency balances table returned by ``broker_sdk`` connectors."""
+    """Render the ``balances`` list returned by ``broker_sdk`` connectors.
+
+    Two row shapes arrive here. Longbridge reports one row per currency with
+    net assets, cash, buying power and margins. ccxt (Binance spot) reports one
+    row per asset with ``free`` / ``used`` / ``total``, where ``used`` is locked
+    in open orders. Each shape gets its own columns: read through the other
+    one's keys, every cell was empty (#1539), and a coin quantity is not a
+    net-asset figure.
+    """
     cell = lambda v: "" if v is None else str(v)  # noqa: E731
+    rows = result.get("balances", [])
+    if any("asset" in row for row in rows):
+        table = Table(
+            title=f"Asset Balances · {result.get('profile_id')}",
+            caption=f"{len(rows)} non-zero balances",
+            box=box.SIMPLE_HEAVY,
+            show_lines=False,
+        )
+        table.add_column("Asset")
+        table.add_column("Free", justify="right")
+        table.add_column("Locked", justify="right")
+        table.add_column("Total", justify="right")
+        for row in rows:
+            table.add_row(cell(row.get("asset")), cell(row.get("free")), cell(row.get("used")), cell(row.get("total")))
+        console.print(table)
+        return EXIT_SUCCESS
     table = Table(title=f"Account Balances · {result.get('profile_id')}", box=box.SIMPLE_HEAVY, show_lines=False)
     table.add_column("Currency")
     table.add_column("Net Assets", justify="right")
@@ -4465,7 +4661,7 @@ def _print_connector_balances(result: dict[str, Any]) -> int:
     table.add_column("Buy Power", justify="right")
     table.add_column("Init Margin", justify="right")
     table.add_column("Maint Margin", justify="right")
-    for row in result.get("balances", []):
+    for row in rows:
         table.add_row(
             cell(row.get("currency")),
             cell(row.get("net_assets")),
@@ -4473,6 +4669,29 @@ def _print_connector_balances(result: dict[str, Any]) -> int:
             cell(row.get("buy_power")),
             cell(row.get("init_margin")),
             cell(row.get("maintenance_margin")),
+        )
+    console.print(table)
+    return EXIT_SUCCESS
+
+
+def _print_connector_assets(result: dict[str, Any]) -> int:
+    """Render Futu's per-currency ``assets`` rows from ``accinfo_query``."""
+    cell = lambda v: "" if v is None else str(v)  # noqa: E731
+    table = Table(title=f"Account Assets · {result.get('profile_id')}", box=box.SIMPLE_HEAVY, show_lines=False)
+    table.add_column("Currency")
+    table.add_column("Total Assets", justify="right")
+    table.add_column("Cash", justify="right")
+    table.add_column("Market Value", justify="right")
+    table.add_column("Available Funds", justify="right")
+    table.add_column("Buying Power", justify="right")
+    for row in result.get("assets", []):
+        table.add_row(
+            cell(row.get("currency")),
+            cell(row.get("total_assets")),
+            cell(row.get("cash")),
+            cell(row.get("market_val")),
+            cell(row.get("available_funds")),
+            cell(row.get("power")),
         )
     console.print(table)
     return EXIT_SUCCESS
@@ -4592,9 +4811,15 @@ def _print_connector_account(result: dict[str, Any]) -> int:
         label = accounts if accounts != "(none)" else result.get("profile_id", result.get("profile", "unknown"))
         console.print(f"Accounts: [cyan]{rich_escape(str(label))}[/cyan]")
         return _print_connector_balances(result)
+    if not rows and result.get("assets"):
+        return _print_connector_assets(result)
     account_data = _normalize_mcp_value(result.get("account"))
     if not rows and isinstance(account_data, dict) and account_data:
         return _print_connector_account_mapping(result, account_data)
+    # Trading 212 returns its cash and account metadata as two separate mappings.
+    split = {key: result[key] for key in ("cash", "metadata") if isinstance(result.get(key), dict) and result[key]}
+    if not rows and split:
+        return _print_connector_account_mapping(result, split)
     if not rows:
         # Not the broker_sdk flat shape — try the remote-MCP nested shape.
         # Robinhood's tool result double-wraps: result["data"] unwraps to
@@ -5033,14 +5258,30 @@ def _dispatch_connector(args: argparse.Namespace) -> int:
             account=args.account,
             yes=args.yes,
         )
-    if sub == "check":
-        return cmd_connector_check(
+    if sub == "setup":
+        return cmd_connector_setup(
             args.profile,
-            host=args.host,
-            port=args.port,
-            client_id=args.client_id,
+            connection_id=args.connection_id,
+            label=args.label,
+            skip_check=args.skip_check,
             account=args.account,
         )
+    if sub == "select-account":
+        return cmd_connector_select_account(
+            args.connection_id,
+            account=args.account,
+            clear=args.clear,
+        )
+    if sub == "check":
+        options = {
+            "host": args.host,
+            "port": args.port,
+            "client_id": args.client_id,
+            "account": args.account,
+        }
+        if args.connection_id is not None:
+            options["connection_id"] = args.connection_id
+        return cmd_connector_check(args.profile, **options)
     if sub == "account":
         return cmd_connector_account(
             args.profile,
@@ -5340,9 +5581,32 @@ def _build_parser() -> argparse.ArgumentParser:
     connector_configure.add_argument("--account", default=None)
     connector_configure.add_argument("-y", "--yes", action="store_true", help="Overwrite without prompting")
 
+    connector_setup = connector_subparsers.add_parser(
+        "setup",
+        help="Create a local read-only connection and securely collect its credentials",
+    )
+    _add_connector_profile_arg(connector_setup, required=True)
+    connector_setup.add_argument("--connection-id", default=None)
+    connector_setup.add_argument("--label", default=None)
+    connector_setup.add_argument("--skip-check", action="store_true")
+    connector_setup.add_argument(
+        "--account",
+        default=None,
+        help="Account to scope an account-scoped connection (Robinhood) to; prompts when omitted",
+    )
+
+    connector_select_account = connector_subparsers.add_parser(
+        "select-account",
+        help="Choose the broker account an account-scoped connection reads",
+    )
+    connector_select_account.add_argument("connection_id", help="Local connection id")
+    connector_select_account.add_argument("--account", default=None, help="Account reference; prompts when omitted")
+    connector_select_account.add_argument("--clear", action="store_true", help="Remove the selection")
+
     connector_check = connector_subparsers.add_parser("check", help="Check selected connector readiness")
     _add_connector_profile_arg(connector_check)
     _add_connector_local(connector_check)
+    connector_check.add_argument("--connection-id", default=None)
 
     connector_status = connector_subparsers.add_parser("status", help="Show selected connector status")
     _add_connector_profile_arg(connector_status)
@@ -5450,22 +5714,22 @@ _PROVIDER_CHOICES: list[dict[str, str | None]] = [
         "key_placeholder": "sk-or-v1-...",
     },
     {
-        "label": "Requesty (OpenAI-compatible gateway - multiple models)",
-        "provider": "requesty",
-        "key_env": "REQUESTY_API_KEY",
-        "base_env": "REQUESTY_BASE_URL",
-        "base_url": "https://router.requesty.ai/v1",
-        "model": "openai/gpt-4o-mini",
-        "key_prefix": None,
-        "key_placeholder": "api-key...",
-    },
-    {
         "label": "DeepSeek",
         "provider": "deepseek",
         "key_env": "DEEPSEEK_API_KEY",
         "base_env": "DEEPSEEK_BASE_URL",
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-v4-pro",
+        "key_prefix": "sk-",
+        "key_placeholder": "sk-...",
+    },
+    {
+        "label": "OpenCode (Go / Zen)",
+        "provider": "opencode",
+        "key_env": "OPENCODE_API_KEY",
+        "base_env": "OPENCODE_BASE_URL",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "model": "deepseek-v4.1-flash",
         "key_prefix": "sk-",
         "key_placeholder": "sk-...",
     },
@@ -5656,8 +5920,6 @@ def _render_env_content(config: dict[str, str]) -> str:
         "LANGCHAIN_PROVIDER",
         "OPENROUTER_API_KEY",
         "OPENROUTER_BASE_URL",
-        "REQUESTY_API_KEY",
-        "REQUESTY_BASE_URL",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "NVIDIA_API_KEY",

@@ -17,8 +17,10 @@ Covers:
 from __future__ import annotations
 
 import concurrent.futures
+from typing import Optional
 
 import pytest
+from pydantic import Field, ValidationError
 
 from src.config.accessor import (
     _parse_bool,
@@ -36,6 +38,7 @@ from src.config.env_schema import (
     PathConfig,
     SwarmConfig,
     _parse_env_bool,
+    _EnvBase,
 )
 
 
@@ -115,6 +118,8 @@ class TestEnvConfigDefaults:
         assert c.data.alphavantage_api_key == ""
         assert c.data.tiingo_api_key == ""
         assert c.data.fmp_api_key == ""
+        assert c.data.gildata_token == ""
+        assert c.data.gildata_base_url.endswith("aidata-assistant-srv-rawapi")
         assert c.data.fred_api_key == ""
         assert c.data.vibe_trading_iwencai_key == ""
         assert c.data.vibe_trading_sec_ua == ""
@@ -125,12 +130,15 @@ class TestEnvConfigDefaults:
         assert c.data.longbridge_app_secret == ""
         assert c.data.longbridge_access_token == ""
         # Per-market source-order overrides default to unset (default chains).
-        for market in (
-            "a_share", "us_equity", "hk_equity", "india_equity", "kr_equity",
-            "ca_equity", "vietnam_equity", "crypto", "futures", "fund",
-            "macro", "forex",
-        ):
-            assert getattr(c.data, f"market_data_order_{market}") == ""
+        # Derived from the chains, not hand-listed: the hand-written list here
+        # and the field block it guarded both missed uk_equity for as long as
+        # that market existed, so a new market shipped without its typed field.
+        from backtest.loaders.registry import FALLBACK_CHAINS
+
+        for market in FALLBACK_CHAINS:
+            field = f"market_data_order_{market}"
+            assert hasattr(c.data, field), f"{field} missing from EnvConfig.data"
+            assert getattr(c.data, field) == ""
 
     def test_api_defaults(self) -> None:
         c = EnvConfig()
@@ -169,6 +177,7 @@ class TestEnvConfigDefaults:
         assert c.agent_tuning.content_filter_warning_threshold == 0.05
         assert c.agent_tuning.vibe_trading_enable_advisory is False
         assert c.agent_tuning.vibe_trading_enable_scheduler is False
+        assert c.agent_tuning.vibe_contextual_identity_constraints is True
         assert c.agent_tuning.vibe_trading_scheduler_max_consecutive_failures == 3
         assert c.agent_tuning.vibe_trading_scheduler_retry_base_delay_ms == 60_000
         assert c.agent_tuning.vibe_trading_scheduler_retry_max_delay_ms == 3_600_000
@@ -216,6 +225,43 @@ class TestEnvConfigTypeCoercion:
         c = EnvConfig()
         assert c.agent_tuning.token_threshold == 40000
 
+    @pytest.mark.parametrize("value", ["not_a_number", "", "1.5", "NaN", "Infinity"])
+    def test_invalid_optional_int_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", value)
+        c = EnvConfig()
+        assert c.llm.anthropic_max_tokens is None
+
+    def test_valid_optional_int_is_coerced(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", "4096")
+        c = EnvConfig()
+        assert c.llm.anthropic_max_tokens == 4096
+        assert isinstance(c.llm.anthropic_max_tokens, int)
+
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_optional_int_still_enforces_its_positive_constraint(self, monkeypatch, value) -> None:
+        monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", value)
+        with pytest.raises(ValidationError):
+            LLMConfig()
+
+    @pytest.mark.parametrize("field", ["anthropic_max_tokens", "ANTHROPIC_MAX_TOKENS"])
+    @pytest.mark.parametrize("value", [None, 4096])
+    def test_explicit_optional_value_wins_over_environment(self, monkeypatch, field, value) -> None:
+        monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", "8192")
+        assert LLMConfig(**{field: value}).anthropic_max_tokens == value
+
+    def test_invalid_explicit_optional_value_is_not_silently_defaulted(self, monkeypatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", "8192")
+        with pytest.raises(ValidationError):
+            LLMConfig(anthropic_max_tokens="invalid")
+
+    @pytest.mark.parametrize("raw,expected", [("", None), ("invalid", None), ("0", 0.0), ("2.5", 2.5)])
+    def test_typing_optional_float_environment_coercion(self, monkeypatch, raw, expected) -> None:
+        class OptionalFloatConfig(_EnvBase):
+            value: Optional[float] = Field(alias="LANGCHAIN_TEMPERATURE", default=None)
+
+        monkeypatch.setenv("LANGCHAIN_TEMPERATURE", raw)
+        assert OptionalFloatConfig().value == expected
+
     def test_bool_coercion_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("VIBE_TRADING_DATA_CACHE", "true")
         c = EnvConfig()
@@ -241,6 +287,13 @@ class TestEnvConfigTypeCoercion:
         assert tuning.vibe_trading_scheduler_max_consecutive_failures == 5
         assert tuning.vibe_trading_scheduler_retry_base_delay_ms == 2500
         assert tuning.vibe_trading_scheduler_retry_max_delay_ms == 10000
+
+    def test_contextual_identity_constraints_can_be_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_CONTEXTUAL_IDENTITY_CONSTRAINTS", "false")
+
+        assert EnvConfig().agent_tuning.vibe_contextual_identity_constraints is False
 
 
 # ===================================================================

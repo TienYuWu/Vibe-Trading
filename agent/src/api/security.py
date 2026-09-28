@@ -642,6 +642,9 @@ async def require_settings_write_auth(
     cred: Optional[HTTPAuthorizationCredentials] = Security(_security),
 ) -> None:
     """Require explicit authorization before changing credential-routing settings."""
+    if request.method.upper() not in _SAFE_BROWSER_METHODS:
+        _reject_cross_site_browser_request(request)
+
     api_key = _configured_api_key()
     if api_key:
         token = _auth_credential_from_header_or_query(cred, None, allow_query=False)

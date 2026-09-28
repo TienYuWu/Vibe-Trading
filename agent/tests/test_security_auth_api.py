@@ -308,6 +308,121 @@ def test_local_dev_can_write_llm_settings_when_api_key_unset(
     assert "OPENAI_BASE_URL=https://api.openai.com/v1" in env_path.read_text(encoding="utf-8")
 
 
+# ============================================================================
+# PUT /settings/llm: cross-site browser guard on require_settings_write_auth
+# ============================================================================
+
+
+def test_settings_write_rejects_cross_site_sec_fetch_site(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A cross-site browser PUT must not reach the settings-write logic."""
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(api_server, "ENV_PATH", env_path)
+
+    response = _local_client().put(
+        "/settings/llm",
+        headers={"Host": "127.0.0.1:8899", "Sec-Fetch-Site": "cross-site"},
+        json=_llm_settings_payload("https://attacker.example/openai-compatible/v1"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Cross-site request denied"
+    assert not env_path.exists()
+
+
+def test_settings_write_rejects_cross_site_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """An Origin that is neither loopback nor the request host is cross-site."""
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(api_server, "ENV_PATH", env_path)
+
+    response = _local_client().put(
+        "/settings/llm",
+        headers={"Host": "127.0.0.1:8899", "Origin": "https://attacker.example"},
+        json=_llm_settings_payload("https://attacker.example/openai-compatible/v1"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Cross-site request denied"
+    assert not env_path.exists()
+
+
+def test_settings_write_same_origin_browser_passes_cross_site_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A same-origin browser PUT clears the guard and reaches the write path."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(api_server, "ENV_PATH", env_path)
+
+    response = _local_client().put(
+        "/settings/llm",
+        headers={
+            "Host": "127.0.0.1:8899",
+            "Origin": "http://127.0.0.1:8899",
+            "Sec-Fetch-Site": "same-origin",
+        },
+        json=_llm_settings_payload("https://api.openai.com/v1"),
+    )
+
+    assert response.status_code == 200
+    assert "OPENAI_BASE_URL=https://api.openai.com/v1" in env_path.read_text(encoding="utf-8")
+
+
+def test_settings_write_remote_same_origin_passes_guard_and_hits_auth_layer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A host-matching Origin passes the guard; the later auth layer still decides."""
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(api_server, "ENV_PATH", env_path)
+    client = TestClient(
+        api_server.app,
+        base_url="http://192.168.1.10:8899",
+        client=("192.168.1.20", 50000),
+    )
+
+    response = client.put(
+        "/settings/llm",
+        headers={
+            "Host": "192.168.1.10:8899",
+            "Origin": "http://192.168.1.10:8899",
+            "Sec-Fetch-Site": "same-origin",
+        },
+        json=_llm_settings_payload("https://api.openai.com/v1"),
+    )
+
+    assert response.status_code == 403
+    assert (
+        response.json()["detail"]
+        == "Settings writes require API_AUTH_KEY or a local loopback client"
+    )
+    assert not env_path.exists()
+
+
+def test_settings_write_without_browser_headers_passes_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A non-browser client (CLI/curl) sends no Origin and must pass the guard."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(api_server, "ENV_PATH", env_path)
+
+    response = _local_client().put(
+        "/settings/llm",
+        json=_llm_settings_payload("https://api.openai.com/v1"),
+    )
+
+    assert response.status_code == 200
+    assert "OPENAI_BASE_URL=https://api.openai.com/v1" in env_path.read_text(encoding="utf-8")
+
+
 def test_loopback_rejects_rebound_host_before_auth_bypass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

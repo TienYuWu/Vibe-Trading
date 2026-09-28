@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useSearchParams } from "react-router";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import {
   useAgentStore,
@@ -93,6 +93,12 @@ interface RuntimeIdentity {
   provider?: string;
   model?: string;
   reasoningEffort?: string;
+}
+
+/** A final answer held back while the grounding gate re-checks a revised draft. */
+interface GroundingRevision {
+  attemptId: string;
+  round: number;
 }
 
 function toolProgressKey(callId: string | undefined, tool: string): string {
@@ -240,6 +246,7 @@ export function Agent() {
   const replayCheckTimerRef = useRef(0);
   const smoothScrollingRef = useRef(false);
   const smoothScrollTimerRef = useRef(0);
+  const historyScrollTimerRef = useRef(0);
   const titleBeforeCompletionRef = useRef<string | null>(null);
   const completedAttemptIdsRef = useRef<Set<string>>(new Set());
 
@@ -249,6 +256,7 @@ export function Agent() {
 
   /* Connector runtime channel state (SPEC Consent §1/§4/§5) */
   const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
+  const [groundingRevision, setGroundingRevision] = useState<GroundingRevision | null>(null);
   const [visibleRowCount, setVisibleRowCount] = useState(TIMELINE_WINDOW_SIZE);
   const visibleRowsSessionRef = useRef<string | null>(null);
   const [llmSettings, setLlmSettings] = useState<LLMSettings | null>(null);
@@ -312,6 +320,14 @@ export function Agent() {
       }
     });
   }, [isNearBottom]);
+
+  const scheduleHistoryScroll = useCallback(() => {
+    window.clearTimeout(historyScrollTimerRef.current);
+    historyScrollTimerRef.current = window.setTimeout(() => {
+      historyScrollTimerRef.current = 0;
+      forceScrollToBottom();
+    }, 50);
+  }, [forceScrollToBottom]);
 
   const flushPendingStreamUpdate = useCallback(() => {
     window.clearTimeout(streamFlushTimerRef.current);
@@ -480,6 +496,7 @@ export function Agent() {
   const doDisconnect = useCallback(() => {
     cancelPendingStreamFlush();
     window.clearTimeout(replayCheckTimerRef.current);
+    window.clearTimeout(historyScrollTimerRef.current);
     disconnect();
     sseSessionRef.current = null;
   }, [cancelPendingStreamFlush, disconnect]);
@@ -534,6 +551,16 @@ export function Agent() {
           };
         }
         const ts = new Date(m.created_at).getTime();
+        // The reply is committed when the attempt ends, so created_at is the
+        // end. The start comes from the persisted attempt start when present,
+        // else is backed out of the attempt's elapsed time; only legacy rows
+        // without either fall back to the first tool call.
+        const startedAtSec = typeof meta?.started_at === "number" ? meta.started_at : NaN;
+        const attemptStartedAt = Number.isFinite(startedAtSec) && startedAtSec > 0
+          ? startedAtSec * 1000
+          : elapsedMs != null
+            ? ts - elapsedMs
+            : undefined;
         const toolTimeline = m.role === "assistant"
           ? buildToolTimelineMessages(m.tool_trail ?? [], {
               fallbackTimestamp: ts,
@@ -544,6 +571,7 @@ export function Agent() {
                 : meta?.status === "cancelled"
                   ? "stopped"
                   : "done",
+              startedAt: attemptStartedAt,
               endedAt: ts,
             })
           : [];
@@ -602,17 +630,49 @@ export function Agent() {
         }
       }
       if (genRef.current !== gen) return;
+      // A background session's SSE stream disconnects the moment you navigate
+      // away (doDisconnect() in the session-switch effect), so the
+      // session_completed event that would normally clear streamingSessionId
+      // never arrives -- the sidebar's "thinking" spinner for that session
+      // sticks around for the rest of the tab's life, even long after the
+      // turn actually finished. Reopening the session re-fetches its
+      // committed history right here; if the newest stored message is
+      // already the assistant's reply, the turn is done, so release the
+      // stale marker instead of leaving it dangling.
+      if (
+        act().streamingSessionId === sid
+        && msgs.length > 0
+        && msgs[msgs.length - 1].role === "assistant"
+      ) {
+        act().clearStreamingSession(sid);
+      }
       act().loadHistory(agentMsgs);
+      // The live activity is carried across a same-session re-mount so its
+      // clock survives, but if the attempt finished while we were away its
+      // committed reply is now in history: the durable row above supersedes
+      // the live one, which would otherwise sit at "Working" until the safety
+      // timeout fired.
+      const liveActivity = act().activity;
+      if (
+        liveActivity
+        && msgs.some((message) => (
+          message.role === "assistant"
+          && message.linked_attempt_id === liveActivity.attemptId
+        ))
+      ) {
+        useAgentStore.setState({ activity: null, toolCalls: [] });
+        if (act().status === "streaming") act().setStatus("idle");
+      }
       act().setSessionLoading(false);
       act().cacheSession(sid, agentMsgs);
       setRuntimeIdentity(latestRuntimeIdentity ?? {});
-      setTimeout(() => forceScrollToBottom(), 50);
+      scheduleHistoryScroll();
     } catch {
       if (genRef.current !== gen) return;
       setRuntimeIdentity({});
       act().setSessionLoading(false);
     }
-  }, [forceScrollToBottom]);
+  }, [scheduleHistoryScroll]);
 
   const refreshSessionMessages = useCallback(async (sid: string) => {
     const gen = genRef.current + 1;
@@ -668,8 +728,15 @@ export function Agent() {
         return false;
       }
       const current = store.activity;
+      // `attempt.started` carries the backend's wall-clock start (epoch
+      // seconds). On a replayed stream that is the original start, so the
+      // elapsed timer resumes from the truth rather than from reconnect time.
+      const startedAtSec = Number(data.started_at);
+      const startedAt = Number.isFinite(startedAtSec) && startedAtSec > 0
+        ? startedAtSec * 1000
+        : undefined;
       if (!current) {
-        store.startActivity(attemptId || `pending-${Date.now()}`);
+        store.startActivity(attemptId || `pending-${Date.now()}`, startedAt);
       } else if (
         attemptId &&
         current.attemptId !== attemptId &&
@@ -677,7 +744,7 @@ export function Agent() {
       ) {
         store.setActivityAttemptId(attemptId);
       } else if (attemptId && current.attemptId !== attemptId) {
-        store.startActivity(attemptId);
+        store.startActivity(attemptId, startedAt);
       }
       act().setActivityState(state);
       return true;
@@ -687,6 +754,8 @@ export function Agent() {
       text_delta: (d) => {
         touch();
         replayAttemptSeenRef.current = true;
+        // Answer text only streams once the grounding gate has released it.
+        setGroundingRevision(null);
         if (!identifyActivity(d, "responding")) return;
         if (act().status !== "streaming") act().setStatus("streaming");
         queueStreamUpdate(String(d.delta || ""), false);
@@ -709,9 +778,32 @@ export function Agent() {
       },
       thinking_done: () => { touch(); /* don't flush — keep streaming text visible */ },
 
+      grounding_status: (d) => {
+        touch();
+        replayAttemptSeenRef.current = true;
+        if (d.stage !== "revising") {
+          // released_redacted: the cut answer (with its own footnote) follows
+          // as text_delta; the status line has nothing left to say.
+          setGroundingRevision(null);
+          return;
+        }
+        if (typeof d.round !== "number" || d.round < 1) return;
+        if (!identifyActivity(d, "thinking")) return;
+        if (act().status !== "streaming") act().setStatus("streaming");
+        const attemptId = act().activity?.attemptId;
+        if (!attemptId) return;
+        // Pinned to the attempt so a line from a run that ended without text
+        // (timeout, cancel, failure) never resurfaces on the next attempt.
+        setGroundingRevision({ attemptId, round: d.round });
+        scrollToBottom();
+      },
+
       tool_call: (d) => {
         touch();
         replayAttemptSeenRef.current = true;
+        // A recovery round fetches evidence before the next draft; the tool
+        // activity line says what is happening, so the status line steps aside.
+        setGroundingRevision(null);
         if (!identifyActivity(d, "working")) return;
         queueStreamUpdate("", false);
         const toolName = String(d.tool || "");
@@ -836,6 +928,7 @@ export function Agent() {
 
       "attempt.completed": async (d) => {
         touch();
+        setGroundingRevision(null);
         const attemptId = String(d.attempt_id || "");
         markBackgroundCompletion(sid, attemptId);
         if (act().sessionId !== sid) {
@@ -854,14 +947,39 @@ export function Agent() {
         }
         const streamedAnswer = act().streamingText + pendingTextRef.current;
         flushPendingStreamUpdate();
+        // No live activity means we never saw this attempt run (connected after
+        // the fact); rebuild its timing from the event rather than from now.
+        const eventStartedSec = Number(d.started_at);
+        const eventElapsedMs = Number(d.elapsed_ms);
+        const eventEndedSec = Number(d.ended_at);
+        const completedEndedAt = Number.isFinite(eventEndedSec) && eventEndedSec > 0
+          ? eventEndedSec * 1000
+          : Date.now();
+        const completedStartedAt = Number.isFinite(eventStartedSec) && eventStartedSec > 0
+          ? eventStartedSec * 1000
+          : Number.isFinite(eventElapsedMs) && eventElapsedMs > 0
+            ? completedEndedAt - eventElapsedMs
+            : undefined;
         if (!act().activity) {
-          act().startActivity(attemptId || `completed-${Date.now()}`);
+          act().startActivity(attemptId || `completed-${Date.now()}`, completedStartedAt);
         } else if (attemptId && act().activity?.attemptId !== attemptId) {
           act().setActivityAttemptId(attemptId);
         }
+        // A client that joined mid-attempt may have started its clock late; the
+        // backend's start is authoritative for the durable row.
+        const liveStart = act().activity?.startedAt;
+        if (
+          completedStartedAt !== undefined
+          && liveStart !== undefined
+          && completedStartedAt < liveStart
+        ) {
+          useAgentStore.setState((state) => ({
+            activity: state.activity ? { ...state.activity, startedAt: completedStartedAt } : null,
+          }));
+        }
         const s = act();
         const completedTools = s.activity?.steps ?? s.toolCalls;
-        const completedActivity = archiveActivity("done");
+        const completedActivity = archiveActivity("done", completedEndedAt);
         const completedAttemptId = completedActivity?.attemptId || attemptId;
         useAgentStore.setState((state) => ({
           messages: state.messages.filter(
@@ -950,6 +1068,7 @@ export function Agent() {
 
       "attempt.failed": (d) => {
         touch();
+        setGroundingRevision(null);
         const attemptId = String(d.attempt_id || "");
         if (act().sessionId !== sid) {
           act().clearStreamingSession(sid);
@@ -991,6 +1110,7 @@ export function Agent() {
       // to avoid showing an error bubble.
       "attempt.cancelled": (d) => {
         touch();
+        setGroundingRevision(null);
         const attemptId = String(d.attempt_id || "");
         if (act().sessionId !== sid) {
           act().clearStreamingSession(sid);
@@ -1172,6 +1292,7 @@ export function Agent() {
       genRef.current = gen;
       doDisconnect();
       setRuntimeIdentity({});
+      setGroundingRevision(null);
       // Live-channel timeline items are per-session; clear on switch.
       setLiveItems([]);
       liveRuntimeRef.current?.resetSession();
@@ -1181,7 +1302,7 @@ export function Agent() {
       const cached = getCachedSession(urlSessionId);
       switchSession(urlSessionId, cached);
       if (cached) {
-        setTimeout(() => forceScrollToBottom(), 50);
+        scheduleHistoryScroll();
       }
       // Cached rows provide an instant shell; REST remains authoritative for a
       // turn that completed while this session was off-screen.
@@ -1199,20 +1320,33 @@ export function Agent() {
       const gen = genRef.current + 1;
       genRef.current = gen;
       setRuntimeIdentity({});
+      setGroundingRevision(null);
       const seed = curMsgs.length > 0 ? curMsgs : getCachedSession(urlSessionId);
+      // switchSession() drops the live activity so replay can rebuild its
+      // steps without duplicating them — but the attempt's start time is not
+      // something replay can restore once the ring buffer has rotated past
+      // `attempt.started`. Re-seed the still-running activity with its
+      // original startedAt so the elapsed clock does not restart at 0s.
+      const liveActivity = act().activity;
       switchSession(urlSessionId, seed);
+      if (liveActivity && liveActivity.endedAt === undefined) {
+        const store = act();
+        store.startActivity(liveActivity.attemptId, liveActivity.startedAt);
+        store.setActivityState(liveActivity.state);
+      }
       loadSessionMessages(urlSessionId, gen);
       setupSSE(urlSessionId);
     } else if (!urlSessionId && curSid) {
       genRef.current += 1;
       doDisconnect();
       setRuntimeIdentity({});
+      setGroundingRevision(null);
       setLiveItems([]);
       liveRuntimeRef.current?.resetSession();
       if (curSid && curMsgs.length > 0) cacheSession(curSid, curMsgs);
       reset();
     }
-  }, [urlSessionId, doDisconnect, loadSessionMessages, setupSSE, forceScrollToBottom]);
+  }, [urlSessionId, doDisconnect, loadSessionMessages, setupSSE, scheduleHistoryScroll]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -1227,6 +1361,8 @@ export function Agent() {
   }, [sessionId, loadGoalSnapshot]);
 
   useEffect(() => () => {
+    // Invalidate pending history loads before they can schedule another scroll.
+    genRef.current += 1;
     doDisconnect();
     cancelAnimationFrame(progressRafRef.current);
     pendingProgressRef.current.clear();
@@ -1628,6 +1764,14 @@ export function Agent() {
     });
   }, [timelineRows.length]);
 
+  const groundingRound = (
+    status === "streaming"
+    && groundingRevision
+    && activity?.attemptId === groundingRevision.attemptId
+  )
+    ? groundingRevision.round
+    : null;
+
   return (
     <div className="flex flex-col flex-1 min-w-0 overflow-hidden h-full">
       <ModelRuntimeBar
@@ -1758,6 +1902,16 @@ export function Agent() {
               <AgentAvatar />
               <div className="flex-1 min-w-0 space-y-2">
                 {activity && <ActivityLine activity={activity} reasoningTail={reasoningTail} />}
+                {groundingRound !== null && (
+                  <p
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-center gap-2 px-3 text-xs text-muted-foreground"
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground/80" aria-hidden="true" />
+                    <span>{t("agent.activity.checkingFigures", { round: groundingRound })}</span>
+                  </p>
+                )}
                 {streamingText && (
                   <div aria-live="polite" aria-atomic="false">
                     <MarkdownContent content={streamingText} streaming showCursor />

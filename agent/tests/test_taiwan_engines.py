@@ -816,19 +816,15 @@ class TestTaiwanFundamentalsAndNews:
         assert _classify_market(code) == expected
 
     @pytest.mark.parametrize(
-        "ticker, market, currency",
-        [("2330.TW", "tw", "TWD"), ("6488.TWO", "tw", "TWD"),
-         ("AAPL.US", "us", "USD"), ("00700.HK", "hk", "HKD")],
+        "ticker, market",
+        [("2330.TW", "tw"), ("6488.TWO", "tw"), ("AAPL.US", "us"), ("00700.HK", "hk")],
     )
-    def test_profile_labels_market_and_currency(
-        self, ticker: str, market: str, currency: str
-    ) -> None:
-        """A missing currency is how a TWD enterprise value of 6.0e13 got
-        compared against a USD 1.5e13 as if the gap were a valuation."""
-        from src.tools.stock_profile_tool import _currency_for, _market_for
+    def test_profile_labels_market(self, ticker: str, market: str) -> None:
+        """Currency now comes from Yahoo's own ``listing`` block upstream; the
+        market label is what still has to be derived from the suffix."""
+        from src.tools.stock_profile_tool import _market_for
 
         assert _market_for(ticker) == market
-        assert _currency_for(ticker) == currency
 
     def test_profile_no_longer_calls_taiwan_a_us_listing(self) -> None:
         from src.tools.stock_profile_tool import _market_for

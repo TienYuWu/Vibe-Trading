@@ -132,7 +132,19 @@ def _as_label_spans(
         if label_end_times.empty:
             raise ValueError("label_end_times is empty")
         starts = label_end_times.index
+        if not starts.is_monotonic_increasing or not starts.is_unique:
+            raise ValueError(
+                "label_end_times index must be unique and monotonically increasing"
+            )
         ends = label_end_times.to_numpy()
+        # A NaT end is a label that resolves after the sample ends (the tail of
+        # ``index.shift(-h)``); searchsorted places it last, which purges the
+        # most. An end before its own start is an error here as in the
+        # positional branch -- the clip below would lift it without a word.
+        if (ends < starts.to_numpy()).any():
+            raise ValueError(
+                "a label cannot end before the observation it belongs to starts"
+            )
         # searchsorted on the start index converts label end *times* into label
         # end *positions*; the right insertion point minus one keeps a label
         # that ends between two observations attached to the earlier one.

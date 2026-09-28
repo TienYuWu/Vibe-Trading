@@ -246,6 +246,55 @@ class TestNormalizeBase:
         assert normalize_base("  ") == ""
 
 
+@pytest.mark.parametrize("query", ["XAUUSD", "XAU/USD", "XAUUSD=X", "XAUUSD.FX"])
+def test_symbol_search_uses_selected_terminal_without_account_or_write_calls(
+    fake_mt5: FakeMT5, query: str
+) -> None:
+    from src.trading.connectors.mt5 import sdk
+
+    def forbidden_account_read() -> Any:
+        raise AssertionError("symbol search must not read account information")
+
+    def forbidden_write(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("symbol search must not call trading operations")
+
+    fake_mt5.account_info = forbidden_account_read  # type: ignore[method-assign]
+    fake_mt5.symbol_select = forbidden_write  # type: ignore[method-assign]
+    fake_mt5.order_check = forbidden_write  # type: ignore[method-assign]
+    fake_mt5.order_send = forbidden_write  # type: ignore[method-assign]
+    result = sdk.search_instruments(
+        query,
+        config=_paper_config(terminal_path="C:/mt5/terminal64.exe"),
+    )
+
+    assert result["status"] == "ok"
+    assert result["instruments"] == [
+        {
+            "symbol": "XAUUSDm",
+            "native_symbol": "XAUUSDm",
+            "market": "mt5",
+            "type": "cfd",
+            "exchange": "Exness-MT5Trial8",
+            "venue": "Exness-MT5Trial8",
+        }
+    ]
+    assert fake_mt5.initialize_calls[-1] == {
+        "args": ("C:/mt5/terminal64.exe",),
+        "kwargs": {"timeout": 15_000},
+    }
+    assert fake_mt5.shutdown_calls == 1
+
+
+def test_symbol_search_without_terminal_path_fails_closed(fake_mt5: FakeMT5) -> None:
+    from src.trading.connectors.mt5 import sdk
+
+    result = sdk.search_instruments("XAUUSD", config=_paper_config())
+
+    assert result["status"] == "error"
+    assert result["instruments"] == []
+    assert fake_mt5.initialize_calls == []
+
+
 class TestSplitSuffix:
     def test_splits_broker_suffix(self) -> None:
         assert split_suffix("EURUSDM") == ("EURUSD", "M")
@@ -644,6 +693,35 @@ class TestPlaceOrder:
         assert result["status"] == "error"
         assert fake_mt5.order_send_requests == []
 
+    def test_symbol_max_volume_errors_instead_of_clamping(self, fake_mt5: FakeMT5) -> None:
+        from src.trading.connectors.mt5 import sdk
+
+        # Connector guards sit above the symbol cap, so the symbol's own
+        # volume_max is the binding constraint: 150 lots asked, 100 allowed.
+        cfg = _paper_config(max_order_volume=500.0, max_order_notional_usd=100_000_000.0)
+        result = sdk.place_order(
+            cfg,
+            symbol="EURUSD", side="buy", quantity=150.0, notional=None,
+            order_type="market", limit_price=None, time_in_force="day",
+        )
+        assert result["status"] == "error"
+        assert "symbol maximum" in result["error"]
+        assert fake_mt5.order_send_requests == []
+
+    def test_notional_over_symbol_max_volume_errors(self, fake_mt5: FakeMT5) -> None:
+        from src.trading.connectors.mt5 import sdk
+
+        # 20M USD / (100k * 1.08 per lot) ~= 185 lots, over the symbol's 100.
+        cfg = _paper_config(max_order_volume=500.0, max_order_notional_usd=100_000_000.0)
+        result = sdk.place_order(
+            cfg,
+            symbol="EURUSD", side="buy", quantity=None, notional=20_000_000.0,
+            order_type="market", limit_price=None, time_in_force="day",
+        )
+        assert result["status"] == "error"
+        assert "symbol maximum" in result["error"]
+        assert fake_mt5.order_send_requests == []
+
     def test_exactly_one_size_required(self, fake_mt5: FakeMT5) -> None:
         assert self._place(fake_mt5, quantity=None, notional=None)["status"] == "error"
         assert self._place(fake_mt5, quantity=0.05, notional=1000.0)["status"] == "error"
@@ -904,3 +982,52 @@ class TestProfilesAndRegistration:
         result = service.place_order("EURUSD", "mt5-live-trade", side="buy", quantity=0.05)
         assert result["status"] == "blocked"
         assert fake_mt5.order_send_requests == []  # gate blocks before any SDK call
+
+
+def test_catalog_ambiguity_is_not_silently_selected(fake_mt5):
+    from src.trading.connectors.mt5 import sdk
+    fake_mt5.symbols["XAUUSDz"] = SimpleNamespace(name="XAUUSDz")
+    result = sdk.search_instruments("XAUUSD", config=_paper_config(terminal_path="C:/mt5/terminal64.exe", symbol_suffix=""))
+    assert result["status"] == "error"
+    assert "ambiguous" in result["error"]
+    assert result["instruments"] == []
+    assert fake_mt5.order_send_requests == []
+
+
+def test_catalog_exact_native_case_preserved(fake_mt5):
+    from src.trading.connectors.mt5 import sdk
+    fake_mt5.symbols["XAUUSDz"] = SimpleNamespace(name="XAUUSDz")
+    result = sdk.search_instruments("XAUUSDz", config=_paper_config(terminal_path="C:/mt5/terminal64.exe"))
+    assert result["instruments"][0]["native_symbol"] == "XAUUSDz"
+    assert "paper_guard" not in result
+    assert "is_demo" not in result
+
+
+def test_catalog_failure_is_redacted_and_detached(fake_mt5):
+    from src.trading.connectors.mt5 import sdk
+    def failing(*args, **kwargs):
+        raise RuntimeError("private broker credential")
+    fake_mt5.symbol_info = failing
+    result = sdk.search_instruments("XAUUSD", config=_paper_config(terminal_path="C:/mt5/terminal64.exe"))
+    assert result["status"] == "error"
+    assert "private broker credential" not in str(result)
+    assert fake_mt5.shutdown_calls == 1
+
+
+def test_catalog_shutdown_does_not_hide_success(fake_mt5):
+    from src.trading.connectors.mt5 import sdk
+    def failing():
+        raise RuntimeError("detach failed")
+    fake_mt5.shutdown = failing
+    result = sdk.search_instruments("XAUUSD", config=_paper_config(terminal_path="C:/mt5/terminal64.exe"))
+    assert result["status"] == "ok"
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1.0, 0.0])
+def test_catalog_invalid_timeout_does_not_attach(fake_mt5, timeout):
+    from src.trading.connectors.mt5 import sdk
+    from dataclasses import replace
+    cfg = replace(_paper_config(terminal_path="C:/mt5/terminal64.exe"), timeout=timeout)
+    result = sdk.search_instruments("XAUUSD", config=cfg)
+    assert result["status"] == "error"
+    assert fake_mt5.initialize_calls == []

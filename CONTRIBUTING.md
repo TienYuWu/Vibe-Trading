@@ -163,3 +163,65 @@ trailer; keep commit metadata clean.
 
 By contributing, you agree that your contributions are licensed under the
 project's MIT license (see `LICENSE`).
+
+## Broker Bring-up Checklist
+
+Apply this checklist to every new connector or capability change. A generated
+matrix row records a declaration; attach separate evidence for runtime claims.
+
+- [ ] Declare each paper/live and read-only/trading profile separately in the
+  connector's `profiles.py`. Do not transfer a paper permission into a live
+  profile. Document sandbox versus local simulation and the structural runtime
+  discriminator; without one, live placement must remain disabled.
+- [ ] Declare only mapped capabilities. Record the actual read/quote endpoints,
+  response shapes, currency, pagination, and unsupported asset coverage, with
+  sanitized fixtures and source references. A listed quote capability is not
+  proof that every position can be priced.
+- [ ] Record supported order kinds and instrument classes from observed schemas
+  or broker documentation; they are not inferred by the matrix. Test unsupported
+  requests and malformed or incomplete replies fail closed.
+- [ ] Test live risk-increasing actions through the shared mandate gate,
+  including account selection, limits, kill switch, and audit. Verify cancel,
+  flatten, position management, and copy paths separately where implemented;
+  placement coverage alone does not establish their coverage.
+- [ ] Separate offline contract tests from authorized sandbox/live verification.
+  State exactly which paths were exercised, when, and which remain unverified.
+  Never commit credentials, account records, or unsanitized broker responses.
+- [ ] Regenerate the README from the repository root and run the CI drift guard:
+  ```bash
+  PYTHONPATH=agent python -m src.trading.capability_matrix
+  pytest agent/tests/test_capability_matrix.py -q
+  ```
+  Include the generated profile rows and verification evidence in the same PR.
+
+### Public-source health lane
+
+The **Public loader health** workflow runs weekly (Monday 04:17 UTC) and can
+be dispatched manually. It is separate from offline PR tests. To reproduce:
+
+```bash
+python3.11 -m venv /tmp/vibe-loader-health-venv
+/tmp/vibe-loader-health-venv/bin/python -m pip install -r tools/requirements-loader-health.txt
+cd agent
+/tmp/vibe-loader-health-venv/bin/python -m backtest.loader_health --output /tmp/loader-health.json
+```
+
+Use the isolated environment: mootdx's HTTP client requirement conflicts with
+the application's dependency range. The canary imports the checkout's loader
+code directly, without installing the full application dependency set.
+
+Each unauthenticated network loader has a liquid canary symbol; the local-file
+loader is explicitly excluded. Adding a public loader requires updating the
+canary catalog, enforced by the offline test suite. Probes bypass the loader
+cache and run with a temporary home and no inherited credentials. Each source
+has a 120-second total subprocess deadline, including two attempts, and the
+workflow has its own job deadline. Reports contain only source identifiers and
+validation metadata, never returned bars, raw exceptions, or account settings.
+
+Missing dependencies, unavailable endpoints, connection failures, malformed
+OHLCV, and bars older than 14 days fail the health lane; none become passing
+skips. A failed lane is an investigation signal, not proof the provider itself
+is broken: runner geography, holidays and upstream changes need checking.
+The 14-day window is a coarse freshness alarm, not a market-calendar guarantee.
+Reports are retained for 30 days. No authenticated source or broker order path
+is exercised.

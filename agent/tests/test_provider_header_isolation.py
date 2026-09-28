@@ -156,6 +156,53 @@ def test_openrouter_async_stream_ignores_non_ascii_ambient_headers() -> None:
     assert seen["authorization"] == "Bearer sk-or-test"
 
 
+@pytest.mark.skipif(
+    ChatOpenAIWithReasoning is None,
+    reason="langchain-openai is not installed",
+)
+def test_an_explicit_header_wins_over_its_ambient_twin_on_the_wire() -> None:
+    """One header, the explicit value, whatever spelling the ambient env used (#1573).
+
+    openai 2.53 (and 3.19.0) merge OPENAI_CUSTOM_HEADERS under default_headers
+    with a plain dict (an ambient ``user-agent`` beside an explicit ``User-Agent``
+    sent both); openai 3.19.2 merges case-insensitively and applies a per-request
+    omit the same way (an omit for the ambient spelling stripped the explicit
+    header). The repo's lock pins 2.53 and CI installs the newest, so both must
+    hold.
+    """
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return _stream_response("ok")
+
+    env = {"OPENAI_CUSTOM_HEADERS": "user-agent: ambient\nX-Other: ambient"}
+    with patch.dict(os.environ, env, clear=True):
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            llm = ChatOpenAIWithReasoning(
+                model="kimi-for-coding",
+                api_key="sk-test",
+                base_url="https://relay.invalid/v1",
+                default_headers={"User-Agent": "provider-value"},
+                http_client=client,
+                vibe_provider="kimi-coding",
+                vibe_api_key="sk-test",
+            )
+            list(llm.stream("hello"))
+
+    assert seen[0].get_list("user-agent") == ["provider-value"]
+    assert "x-other" not in seen[0]
+    # The wire above is checked against whichever openai CI installed; the
+    # overrides are checked here so both merge styles are pinned on any version:
+    # the ambient spelling is omitted (2.x), and the explicit value comes after
+    # that omit (3.x drops every spelling of a name when it meets the omit).
+    overrides = llm._provider_scoped_extra_headers()
+    names = list(overrides)
+    assert type(overrides["user-agent"]).__name__ == "Omit"
+    assert overrides["User-Agent"] == "provider-value"
+    assert names.index("User-Agent") > names.index("user-agent")
+
+
 def test_build_rejects_non_ascii_openrouter_api_key_before_transport() -> None:
     """A malformed Bearer credential should name its setting without leaking it."""
     import src.providers.llm as llm_mod

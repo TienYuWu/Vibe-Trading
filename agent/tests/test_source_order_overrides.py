@@ -150,17 +150,15 @@ def test_override_reorders_in_place_for_byname_importers(
     The reassignment must be a setitem on the same dict object so those
     by-name references observe the new order.
     """
-    monkeypatch.setenv("MARKET_DATA_ORDER_FUTURES", "akshare,tushare,local")
+    monkeypatch.setenv("MARKET_DATA_ORDER_FUTURES", "local,akshare")
     refresh_source_order_overrides()
-    assert FALLBACK_CHAINS["futures"] == ["akshare", "tushare", "local"]
+    assert FALLBACK_CHAINS["futures"] == ["local", "akshare"]
 
     override = registry.get_source_order_override("futures")
-    assert override == ["akshare", "tushare", "local"]
+    assert override == ["local", "akshare"]
     # Returned copies — callers cannot corrupt internal state.
     override.append("zzz")
-    assert registry.get_source_order_override("futures") == [
-        "akshare", "tushare", "local",
-    ]
+    assert registry.get_source_order_override("futures") == ["local", "akshare"]
 
 
 @pytest.mark.parametrize(
@@ -190,7 +188,7 @@ def test_empty_string_resets_to_default(
 ) -> None:
     monkeypatch.setenv(
         "MARKET_DATA_ORDER_A_SHARE",
-        "tushare,tencent,mootdx,eastmoney,baostock,akshare,local",
+        "tushare,tencent,mootdx,eastmoney,baostock,akshare,gildata,local",
     )
     refresh_source_order_overrides()
     assert registry.FALLBACK_CHAINS["a_share"][0] == "tushare"

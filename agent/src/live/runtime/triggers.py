@@ -236,8 +236,13 @@ class Trigger:
         return cls(kind=TriggerKind.INTERVAL, interval_ms=interval_ms, epoch_ms=epoch_ms)
 
     @classmethod
-    def market(cls, market: str) -> "Trigger":
+    def _market(cls, market: str) -> "Trigger":
         """Build a market-session trigger for a known market key.
+
+        Declared under a private name on purpose: ``market`` is a **field**, and
+        a classmethod of that name in this body would replace the field's
+        ``None`` default before ``@dataclass`` reads it. The public
+        ``Trigger.market`` is bound after the class body — see the note there.
 
         Args:
             market: A key into :data:`MARKET_SPECS` (e.g. ``"us_equity"``).
@@ -264,6 +269,35 @@ class Trigger:
             A frozen EVENT :class:`Trigger`.
         """
         return cls(kind=TriggerKind.EVENT, predicate=predicate)
+
+
+# ``market`` is both a dataclass field (default ``None``) and the MARKET
+# constructor. A classmethod of that name declared *inside* the class body
+# replaces the field's default before ``@dataclass`` reads it, so every
+# INTERVAL/EVENT trigger carried the bound method in ``market``. That is
+# invisible to :func:`due_now`, which reads ``market`` only for MARKET
+# triggers, but it is wrong in ``repr`` and fatal to ``dataclasses.asdict`` and
+# JSON. No production path serialises a ``Trigger`` today — jobs persist a
+# plain kind string, not the descriptor — so this is a latent footgun rather
+# than an active break.
+#
+# Binding the factory under its public name here, once the decorator has
+# already recorded the field, keeps both halves of the contract: the field
+# defaults to ``None`` and ``Trigger.market(...)`` still builds a MARKET
+# trigger.
+#
+# No in-body spelling works, so this placement is load-bearing, not stylistic:
+# reordering the two names only moves the damage (the field default becomes the
+# method, or the factory becomes ``None``), and an explicit
+# ``field(default=None)`` is overwritten the same way.
+# Keep the descriptor, not a method already bound to Trigger: subclasses must
+# receive their own ``cls`` just as they do through ``interval`` and ``event``.
+Trigger.market = classmethod(Trigger._market.__func__)  # type: ignore[assignment]
+del Trigger._market
+# Introspection must not leak the private placeholder: ``help()`` and ``repr``
+# read ``__qualname__``, while ``str()`` and logging read ``__name__``.
+Trigger.market.__func__.__qualname__ = "Trigger.market"
+Trigger.market.__func__.__name__ = "market"
 
 
 # --------------------------------------------------------------------------- #

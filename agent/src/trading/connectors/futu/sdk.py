@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import socket
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
@@ -233,8 +234,16 @@ def check_status(config: FutuConfig | None = None) -> dict[str, Any]:
         A health report dict.
     """
     cfg = config or load_config()
+    # ``connection_state``/``error_code``/``last_checked_at`` are the envelope
+    # /live/status reads through a closed vocabulary (live_routes.py
+    # _CONNECTION_STATES / _ERROR_CODES). Omitting them is not a cosmetic gap:
+    # the Web UI treats anything other than "connected"/"ready" as unavailable,
+    # so a working OpenD connection rendered as down. Same shape as longbridge.
     report: dict[str, Any] = {
         "status": "ok",
+        "connection_state": "connected",
+        "error_code": None,
+        "error": None,
         "config": _public_config(cfg),
         "sdk": {"package": "futu-api", "installed": futu_available()},
         "paper_guard": "trd_env_acc_list",
@@ -244,30 +253,42 @@ def check_status(config: FutuConfig | None = None) -> dict[str, Any]:
     gateway_open = tcp_port_open(cfg.host, cfg.port)
     report["gateway"] = {"host": cfg.host, "port": cfg.port, "open": gateway_open}
     if not gateway_open:
-        report["status"] = "error"
-        report["error"] = (
+        return _status_error(
+            report,
+            "network_unreachable",
             f"No Futu OpenD gateway is listening at {cfg.host}:{cfg.port}. "
-            "Start OpenD, log in, and confirm the API port."
+            "Start OpenD, log in, and confirm the API port.",
         )
-        return report
 
     if not report["sdk"]["installed"]:
-        report["status"] = "error"
-        report["error"] = "Optional dependency missing: install with `pip install futu-api`."
-        return report
+        return _status_error(
+            report,
+            "sdk_missing",
+            "Optional dependency missing: install with `pip install futu-api`.",
+        )
 
     try:
         snapshot = get_account_snapshot(cfg)
     except Exception as exc:  # noqa: BLE001 - health endpoint reports cleanly
-        report["status"] = "error"
-        report["error"] = str(exc)
-        return report
+        return _status_error(report, "broker_error", str(exc))
 
     report["account"] = {
         "profile": cfg.profile,
         "trd_env": cfg.trd_env_name,
         "acc_id": snapshot.get("acc_id"),
     }
+    report["last_checked_at"] = datetime.now(timezone.utc).isoformat()
+    return report
+
+
+def _status_error(report: dict[str, Any], code: str, message: str) -> dict[str, Any]:
+    """Stamp a failed health report with the closed-vocabulary diagnostics."""
+    report.update(
+        status="error",
+        connection_state="error",
+        error_code=code,
+        error=message,
+    )
     return report
 
 
@@ -394,7 +415,12 @@ def get_historical_bars(
     limit: int = 90,
     **_: Any,
 ) -> dict[str, Any]:
-    """Fetch historical K-line bars for ``symbol`` (e.g. ``US.AAPL``)."""
+    """Fetch historical K-line bars for ``symbol`` (e.g. ``US.AAPL``).
+
+    Bars are forward-adjusted (Futu ``AuType.QFQ``, the SDK default, passed
+    explicitly so a futu-side default change cannot silently switch the
+    caliber). The response declares the caliber in ``adjustment``.
+    """
     cfg = config or load_config()
     futu = _require_futu()
     ktype_name = _KLTYPE_MAP.get(period.strip(), "K_DAY")
@@ -402,11 +428,16 @@ def get_historical_bars(
     quote_ctx = _quote_ctx(cfg)
     try:
         code = symbol.strip().upper()
-        rows = _records(_unwrap(quote_ctx.request_history_kline(code, ktype=ktype, max_count=int(limit))))
+        autype = getattr(getattr(futu, "AuType", None), "QFQ", None)
+        request: dict[str, Any] = {"ktype": ktype, "max_count": int(limit)}
+        if autype is not None:
+            request["autype"] = autype
+        rows = _records(_unwrap(quote_ctx.request_history_kline(code, **request)))
         return {
             "status": "ok",
             "symbol": code,
             "period": period,
+            "adjustment": "qfq",
             "bars": [_bar_to_dict(row) for row in rows],
         }
     finally:

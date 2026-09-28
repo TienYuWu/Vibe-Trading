@@ -1,6 +1,6 @@
 {
   "app": {
-    "version": "v0.1.14"
+    "version": "v0.1.15"
   },
   "layout": {
     "home": "ホーム",
@@ -122,9 +122,9 @@
     "connectorVerifyFailed": "接続を検証できませんでした。",
     "diagnosticCredentialsPartial": "認証情報が不足しています。必要な変数をすべて設定し、サービスを再作成してください。",
     "diagnosticCredentialsConflict": "認証情報の取得元が競合しています。完全な取得元を1つだけ残して、再試行してください。",
-    "diagnosticSdkMissing": "バックエンドサービスに Longbridge SDK がインストールされていません。",
+    "diagnosticSdkMissing": "このブローカーに必要な SDK がバックエンドサービスにインストールされていません。",
     "diagnosticAuthenticationFailed": "認証に失敗しました。設定した認証情報を確認してください。",
-    "diagnosticNetworkUnreachable": "Longbridge サービスに接続できません。ネットワーク接続を確認して再試行してください。",
+    "diagnosticNetworkUnreachable": "ブローカーのサービスまたはローカルゲートウェイに接続できません。接続先アドレスとネットワーク接続を確認して再試行してください。",
     "diagnosticBrokerError": "ブローカーが読み取り専用の検証リクエストを拒否しました。再試行するか、バックエンドのログを確認してください。"
   },
   "scheduled": {
@@ -416,7 +416,346 @@
       "stoppedToast": "IM チャンネルを停止しました",
       "refreshFailed": "IM チャンネルの更新に失敗しました",
       "startFailed": "IM チャンネルの開始に失敗しました",
-      "stopFailed": "IM チャンネルの停止に失敗しました"
+      "stopFailed": "IM チャンネルの停止に失敗しました",
+      "config": {
+        "toggleConfig": "{{name}} を設定",
+        "keepCurrent": "現在の値を使用（{{masked}}）",
+        "secretNotSet": "未設定",
+        "clearSecret": "クリア",
+        "required": "必須",
+        "listPlaceholder": "値を入力して Enter で追加",
+        "removeValue": "{{value}} を削除",
+        "save": "設定を保存",
+        "hotApply": "保存するとすぐに反映されます。再起動は不要です。",
+        "saved": "チャンネル設定を保存しました",
+        "saveFailed": "チャンネル設定の保存に失敗しました: {{message}}",
+        "test": "接続テスト",
+        "testing": "テスト中…",
+        "testOk": "接続を確認しました",
+        "testFailed": "接続テストに失敗しました: {{message}}",
+        "testCodeOk": "プロバイダーがこの認証情報を受け付けました。",
+        "testCodeInvalidCredentials": "プロバイダーがこの認証情報を拒否しました。",
+        "testCodeNetwork": "プロバイダーに接続できませんでした。",
+        "testCodeUnsupported": "このチャンネルは接続テストに対応していません。",
+        "testedSavedConfig": "保存済みの設定をテストしました。",
+        "testedDraftConfig": "フォーム上の値（未保存）をテストしました。",
+        "enable": "チャンネルを有効化",
+        "enableHint": "無効化しても認証情報は保持され、いつでも再有効化できます。",
+        "enabledToast": "チャンネルを有効化しました",
+        "disabledToast": "チャンネルを無効化しました",
+        "enableFailed": "チャンネルの有効化に失敗しました: {{message}}",
+        "disableFailed": "チャンネルの無効化に失敗しました: {{message}}",
+        "enableRejected": "プロバイダーが認証情報を拒否したため、チャンネルは有効化されませんでした。",
+        "enableRejectedDetail": "プロバイダーの応答: {{detail}}",
+        "enableAnyway": "それでも有効化",
+        "enableAnywayHint": "それでも有効化すると認証情報の検証をスキップします。接続に失敗する可能性があります。",
+        "notWritable": "チャンネル設定は YAML ファイル（{{path}}）に保存されているため、Web UI からは編集できません。認証情報を変更するにはファイルを直接編集してください。",
+        "notWritableChip": "読み取り専用（YAML）",
+        "sdkMissing": "ランタイム SDK が未インストール — {{hint}}",
+        "sdkMissingNoHint": "ランタイム SDK が未インストールです。設定はできますが、起動できない場合があります。",
+        "noFields": "このチャンネルに設定可能な項目はありません。",
+        "loadFailed": "チャンネル設定を読み込めませんでした。"
+      },
+      "fields": {
+        "dingtalk": {
+          "client_id": {
+            "label": "Client ID（AppKey）",
+            "help": "DingTalk 開発者コンソールの「認証情報」ページにあるアプリの AppKey です。"
+          },
+          "client_secret": {
+            "label": "Client Secret（AppSecret）",
+            "help": "アプリの AppSecret。サーバー側に保存され、ブラウザーには返されません。"
+          },
+          "allow_from": {
+            "label": "許可する送信者",
+            "help": "エージェントと対話できる DingTalk 送信者 ID の許可リスト（「*」で全員許可）。未ペアの送信者には DM でペアリングコードが送られます。"
+          },
+          "allow_remote_media_redirects": {
+            "label": "メディアのリダイレクトを許可",
+            "help": "メッセージのメディアをダウンロードする際にプロバイダーのリダイレクトを追跡します（既定はオフ）。"
+          },
+          "remote_media_redirect_allowed_hosts": {
+            "label": "許可するリダイレクト先ホスト",
+            "help": "メディアリダイレクトを有効にしたときに許可するホスト。空の場合、クロスホストのリダイレクトはすべて拒否されます。"
+          },
+          "group_user_isolation": {
+            "label": "グループでユーザーごとにセッション分離",
+            "help": "グループチャットの各メンバーに個別のエージェントセッションを割り当てます。"
+          },
+          "force_ipv4": {
+            "label": "IPv4 を強制",
+            "help": "DingTalk API 呼び出しを IPv4 にバインドします。送信元 IP ホワイトリストがあり、IPv6 プレフィックスは変動するが IPv4 は安定している場合に有効にします。"
+          }
+        },
+        "qq": {
+          "app_id": {
+            "label": "AppID",
+            "help": "QQ 公式プラットフォーム（q.qq.com）のアプリ設定にあるボットの AppID です。"
+          },
+          "secret": {
+            "label": "AppSecret",
+            "help": "ボットの AppSecret。サーバー側に保存され、ブラウザーには返されません。"
+          },
+          "allow_from": {
+            "label": "許可する送信者",
+            "help": "エージェントと対話できる QQ 送信者 openid の許可リスト（「*」で全員許可）。未ペアの送信者には DM でペアリングコードが送られます。"
+          },
+          "msg_format": {
+            "label": "メッセージ形式",
+            "help": "返信形式：plain または markdown。"
+          },
+          "ack_message": {
+            "label": "確認メッセージ",
+            "help": "メッセージ受信時にすぐ送信する確認応答。空欄にすると送信しません。"
+          },
+          "media_dir": {
+            "label": "メディアディレクトリ",
+            "help": "受信した添付ファイルの保存先。空欄の場合は ~/.vibe-trading/media/qq を使用します。"
+          },
+          "download_chunk_size": {
+            "label": "ダウンロードチャンクサイズ",
+            "help": "添付ファイルをダウンロードする際の 1 チャンクあたりのバイト数（既定 262144）。"
+          },
+          "download_max_bytes": {
+            "label": "最大ダウンロードサイズ（バイト）",
+            "help": "1 つの添付ファイルのダウンロードに対する安全上限（既定 209715200＝200 MB）。"
+          }
+        },
+        "email": {
+          "consent_granted": {
+            "label": "同意済み",
+            "help": "マスター許可スイッチ。ここで明示的に同意するまで、このチャンネルはメールを読み取り・送信しません。"
+          },
+          "imap_host": {
+            "label": "IMAP ホスト",
+            "help": "受信メールサーバーのホスト名（例: imap.gmail.com）。新着メールはこのサーバーから IMAP でポーリングします。"
+          },
+          "imap_port": {
+            "label": "IMAP ポート",
+            "help": "受信ポート（既定 993、SSL 使用）。"
+          },
+          "imap_username": {
+            "label": "IMAP ユーザー名",
+            "help": "IMAP のログインに使うメールボックスアカウント。通常はメールアドレス全体です。"
+          },
+          "imap_password": {
+            "label": "IMAP パスワード",
+            "help": "IMAP 用のメールボックスパスワードまたはアプリパスワード。サーバー側にのみ保存され、ブラウザーには返されません。"
+          },
+          "imap_mailbox": {
+            "label": "IMAP メールボックス",
+            "help": "新着メールをポーリングするフォルダー（既定 INBOX）。"
+          },
+          "imap_use_ssl": {
+            "label": "IMAP SSL",
+            "help": "SSL 経由で IMAP に接続します（既定オン。ポート 993 では必須）。"
+          },
+          "imap_use_tls": {
+            "label": "IMAP STARTTLS",
+            "help": "IMAP SSL がオフのとき、ログイン前に STARTTLS で接続を暗号化します（既定オン。ポート 143 の標準）。TLS に対応しないサーバーを信頼できるネットワークで使う場合のみオフにしてください。オフにするとパスワードが平文で送信されます。"
+          },
+          "smtp_host": {
+            "label": "SMTP ホスト",
+            "help": "送信メールサーバーのホスト名（例: smtp.gmail.com）。返信はこのサーバー経由で送信されます。"
+          },
+          "smtp_port": {
+            "label": "SMTP ポート",
+            "help": "送信ポート（既定 587、STARTTLS 使用。465 は暗黙的 SSL 用）。"
+          },
+          "smtp_username": {
+            "label": "SMTP ユーザー名",
+            "help": "SMTP 認証に使うアカウント。通常はメールアドレス全体です。"
+          },
+          "smtp_password": {
+            "label": "SMTP パスワード",
+            "help": "SMTP 用のパスワードまたはアプリパスワード。サーバー側にのみ保存され、ブラウザーには返されません。"
+          },
+          "smtp_use_tls": {
+            "label": "SMTP STARTTLS",
+            "help": "STARTTLS で SMTP 接続を暗号化します（既定オン。ポート 587 の標準）。実際には SMTP SSL と併用しません。"
+          },
+          "smtp_use_ssl": {
+            "label": "SMTP SSL",
+            "help": "暗黙的 TLS で SMTP に接続します（例: ポート 465、既定オフ）。実際には STARTTLS と併用しません。"
+          },
+          "verify_tls": {
+            "label": "TLS 証明書を検証",
+            "help": "メールサーバーの TLS 証明書とホスト名を検証します（推奨）。自己署名または社内 CA のサーバーの場合のみ無効にしてください。"
+          },
+          "from_address": {
+            "label": "送信元アドレス",
+            "help": "返信メールの送信元アドレス。空欄の場合は SMTP ユーザー名を使用します。"
+          },
+          "auto_reply_enabled": {
+            "label": "自動返信",
+            "help": "受信メールに自動で返信します。エージェントが主体的に行う送信には影響しません。"
+          },
+          "poll_interval_seconds": {
+            "label": "ポーリング間隔（秒）",
+            "help": "IMAP で新着メールを確認する頻度（既定 30、最小 5）。"
+          },
+          "mark_seen": {
+            "label": "既読にする",
+            "help": "処理済みのメールをメールボックスで既読にします。"
+          },
+          "post_action": {
+            "label": "処理後の動作",
+            "help": "処理済みメールの扱い: delete（削除）、move（別フォルダーへ移動）、空欄ならそのまま保持。"
+          },
+          "post_action_move_mailbox": {
+            "label": "移動先メールボックス",
+            "help": "「処理後の動作」で move を選んだ場合の移動先フォルダー。"
+          },
+          "post_action_expunge": {
+            "label": "削除後に expunge",
+            "help": "削除したメールに削除フラグを残さず、完全に消去します。"
+          },
+          "post_action_ignore_skipped": {
+            "label": "自分と除外メールは対象外",
+            "help": "スキップされたメール（自分のメールや許可リストで除外された送信者）には処理後の動作を適用しません（既定オン）。"
+          },
+          "max_body_chars": {
+            "label": "本文の最大文字数",
+            "help": "メール本文をこの文字数で切り詰めます（既定 12000）。"
+          },
+          "subject_prefix": {
+            "label": "返信の件名プレフィックス",
+            "help": "返信の件名に付けるプレフィックス（既定 \"Re: \"）。"
+          },
+          "allow_from": {
+            "label": "許可する送信者",
+            "help": "エージェントと対話できるメールアドレスの許可リスト（任意、\"*\" で全員を許可）。未ペアリングの送信者には返信でペアリングコードが届きます。"
+          },
+          "verify_dkim": {
+            "label": "DKIM を検証",
+            "help": "Authentication-Results ヘッダーに dkim=pass を要求します。DKIM と SPF の両方を無効にすると、偽装された From ヘッダーを受け入れます。"
+          },
+          "verify_spf": {
+            "label": "SPF を検証",
+            "help": "Authentication-Results ヘッダーに spf=pass を要求します。DKIM と SPF の両方を無効にすると、偽装された From ヘッダーを受け入れます。"
+          },
+          "allowed_attachment_types": {
+            "label": "許可する添付タイプ",
+            "help": "受信添付ファイルの MIME 許可リスト（例: application/pdf、image/*）。空欄にすると添付が無効になります。"
+          },
+          "max_attachment_size": {
+            "label": "添付サイズ上限（バイト）",
+            "help": "1 件の添付ファイルの最大バイト数（既定 2000000 = 2 MB）。"
+          },
+          "max_attachments_per_email": {
+            "label": "1 通あたりの添付数上限",
+            "help": "1 通のメールから受け入れる添付ファイルの最大数（既定 5）。"
+          }
+        },
+        "websocket": {
+          "host": {
+            "label": "バインドホスト",
+            "help": "WebSocket サーバーがバインドするローカルアドレス（既定 127.0.0.1、ローカル専用）。0.0.0.0 や :: などのワイルドカードホストは全インターフェースに公開されるため、トークンまたはトークン発行シークレットがないと拒否されます。"
+          },
+          "port": {
+            "label": "バインドポート",
+            "help": "WebSocket サーバーが待ち受けるローカルポート（既定 8765）。Unix ソケットパスを設定した場合は無視されます。"
+          },
+          "unix_socket_path": {
+            "label": "Unix ソケットパス",
+            "help": "任意の絶対パス。設定すると、ホストとポートの代わりにこの Unix ソケットで待ち受けます。"
+          },
+          "path": {
+            "label": "アップグレードパス",
+            "help": "クライアントが接続する WebSocket アップグレードパス（既定 /）。「/」で始まる必要があります。"
+          },
+          "token": {
+            "label": "静的トークン",
+            "help": "ハンドシェイク時に token クエリパラメーターで照合する共有シークレット。サーバー側にのみ保存され、ブラウザーには返されません。"
+          },
+          "token_issue_path": {
+            "label": "トークン発行パス",
+            "help": "短期のワンタイムトークンを JSON で返す HTTP GET ルート。アップグレードパスとは別の値にする必要があります。"
+          },
+          "token_issue_secret": {
+            "label": "トークン発行シークレット",
+            "help": "トークン発行ルートが要求する Bearer シークレット（Authorization: Bearer または X-Vibe-Trading-Auth）。サーバー側にのみ保存され、ブラウザーには返されません。"
+          },
+          "token_ttl_s": {
+            "label": "発行トークンの TTL（秒）",
+            "help": "トークン発行ルートが発行するトークンの有効期間（秒、30〜86400、既定 300）。"
+          },
+          "websocket_requires_token": {
+            "label": "トークンを必須にする",
+            "help": "有効な静的トークンまたは発行済みトークンを持たないハンドシェイクを拒否します（既定オン）。"
+          },
+          "allow_from": {
+            "label": "許可するクライアント",
+            "help": "接続を許可するクライアント ID の許可リスト（任意、\"*\" で全員を許可、既定）。"
+          },
+          "streaming": {
+            "label": "出力をストリーミング",
+            "help": "モデル出力の差分を、生成されるそばから接続中のクライアントへ配信します。"
+          },
+          "max_message_bytes": {
+            "label": "メッセージ上限（バイト）",
+            "help": "受け入れる受信フレームの最大バイト数（既定 37748736、範囲 1024〜41943040）。"
+          },
+          "ping_interval_s": {
+            "label": "Ping 間隔（秒）",
+            "help": "キープアライブ ping を送る間隔（5〜300、既定 20）。"
+          },
+          "ping_timeout_s": {
+            "label": "Ping タイムアウト（秒）",
+            "help": "ping 応答を待つ秒数。超えると接続を切断します（5〜300、既定 20）。"
+          },
+          "ssl_certfile": {
+            "label": "TLS 証明書パス",
+            "help": "WSS 用のサーバー上の PEM 証明書パス。証明書と鍵は両方を設定するか、両方空にしてください。アップロード素材ではなくサーバー上のファイルパスです。"
+          },
+          "ssl_keyfile": {
+            "label": "TLS 鍵パス",
+            "help": "WSS 用のサーバー上の PEM 秘密鍵パス。証明書と鍵は両方を設定するか、両方空にしてください。アップロード素材ではなくサーバー上のファイルパスです。"
+          }
+        }
+      },
+      "guides": {
+        "dingtalk": {
+          "title": "DingTalk セットアップガイド",
+          "intro": "DingTalk ボットは Stream モードを使うため、公開コールバック URL は不要です。",
+          "step1": "DingTalk 開発者コンソール（open-dev.dingtalk.com）でアプリを作成します。",
+          "step2": "アプリにボット機能を追加し、Stream モードを有効にします。",
+          "step3": "アプリの AppKey を Client ID に、AppSecret を Client Secret に貼り付けます。",
+          "step4": "アプリを公開して、組織内で利用できるようにします。",
+          "step5": "ここに戻って「接続テスト」をクリックし、チャンネルを有効化します。",
+          "docsLabel": "DingTalk 開発者コンソールを開く"
+        },
+        "qq": {
+          "title": "QQ セットアップガイド",
+          "intro": "QQ ボットは公式 botpy SDK を介して WebSocket で接続するため、公開コールバック URL は不要です。",
+          "step1": "QQ 公式プラットフォーム（q.qq.com）に登録し、ボットを作成します。",
+          "step2": "ボットの開発設定ページで AppID と AppSecret をコピーします。",
+          "step3": "それらを上の AppID と AppSecret のフィールドに貼り付けます。",
+          "step4": "プラットフォームのサンドボックス／公開ルールに従って、ボットを QQ グループに追加するか、個別にチャットします。",
+          "step5": "ここに戻って「接続テスト」をクリックし、チャンネルを有効化します。",
+          "docsLabel": "QQ 公式プラットフォームを開く"
+        },
+        "email": {
+          "title": "メール設定ガイド",
+          "intro": "メールチャンネルは受信を IMAP ポーリング、返信を SMTP で行うため、公開コールバック URL は不要です。",
+          "step1": "メールプロバイダーの IMAP / SMTP のホスト名とポートを確認します（通常は imap.<プロバイダー> の 993 と smtp.<プロバイダー> の 587）。",
+          "step2": "メールボックスの設定で IMAP と SMTP を有効にし、プロバイダーが求める場合（Gmail、QQ メールなど 2 段階認証を使う場合）はアプリパスワードを作成します。",
+          "step3": "上の IMAP / SMTP 認証情報を入力し、送信元アドレスを設定して、自分のアドレスを「許可する送信者」に追加します。",
+          "step4": "「接続テスト」をクリックします。IMAP ログイン、メールボックスフォルダー、SMTP ログインの順に確認されます。",
+          "step5": "「同意済み」にチェックを入れてチャンネルを有効にすると、DKIM/SPF 検証を通過した送信者に自動返信が届きます。",
+          "docsLabel": "Vibe-Trading のドキュメントを開く"
+        },
+        "websocket": {
+          "title": "WebSocket 設定ガイド",
+          "intro": "WebSocket チャンネルはローカルサーバーを起動し、クライアントが WebSocket URL で直接接続するため、公開コールバック URL は不要です。",
+          "step1": "バインドアドレスを選びます。ローカル専用なら 127.0.0.1 のまま、外部に公開するなら 0.0.0.0 または :: を設定します（ワイルドカードホストにはトークンまたはトークン発行シークレットが必須です）。",
+          "step2": "静的トークンを設定するか、トークン発行パスとその Bearer シークレットを設定して、クライアントが短期トークンを取得できるようにします。",
+          "step3": "クライアントは ws://host:port/path?client_id=...&token=... で接続します。",
+          "step4": "チャンネル実行中に保存するとサーバーがホットスワップされます。接続中のクライアント（この Web UI チャットを含む）は一時的に切断され、自動的に再接続します。",
+          "step5": "「接続テスト」をクリックすると、SSL 証明書/鍵の素材とアドレスの可用性をローカルで検証します。",
+          "docsLabel": "Vibe-Trading のドキュメントを開く"
+        }
+      }
     },
     "generation": "生成設定",
     "dataSourceSettings": "データソース設定",
@@ -444,6 +783,9 @@
         "kr_equity": "韓国株",
         "ca_equity": "カナダ株",
         "vietnam_equity": "ベトナム株",
+        "ar_equity": "アルゼンチン株",
+        "uk_equity": "英国株",
+        "index": "指数",
         "crypto": "暗号資産",
         "futures": "先物",
         "fund": "ファンド",
@@ -452,7 +794,9 @@
       }
     },
     "tushareToken": "Tushare トークン",
+    "gildataToken": "Gildata トークン",
     "clearTushareToken": "保存済み Tushare トークンをクリア",
+    "clearGildataToken": "保存済み Gildata トークンをクリア",
     "saveDataSourceSettings": "データソース設定を保存",
     "baostock": "BaoStock",
     "loadLlmSettingsFailed": "LLM 設定の読み込みに失敗: {{message}}",
@@ -484,7 +828,8 @@
     "oauth": "OAuth",
     "authentication": "認証",
     "apiKey": "APIキー",
-    "tushareTokenDesc": "中国A株・先物・ファンド・マクロデータに使用します。未設定の場合、利用可能なところではAKShareにフォールバックします。"
+    "tushareTokenDesc": "中国A株・先物・ファンド・マクロデータに使用します。未設定の場合、利用可能なところではAKShareにフォールバックします。",
+    "gildataTokenDesc": "オプションの恒生聚源（Gildata）中国A株データソース。設定すると、日足（前調整）でA株フォールバックチェーンの末尾に加わります。"
   },
   "qveris": {
     "title": "QVeris ツールマーケットプレイス",
@@ -597,7 +942,8 @@
       "failed": "失敗",
       "steps": "{{count}} ステップ",
       "continue": "続行",
-      "reattach": "再接続"
+      "reattach": "再接続",
+      "checkingFigures": "回答内の数値を確認中（{{round}} 回目）…"
     },
     "resumeConnector": "コネクタを再開",
     "resumeConnectorTitle": "キルスイッチを解除してコネクタ活動を再開",
@@ -609,6 +955,8 @@
     "runNotFound": "実行が見つかりません",
     "runNotFoundDesc": "実行ディレクトリが削除されたか、ブラウザに API アクセスが設定されていない可能性があります。リモートでアクセスする場合は、設定で API 認証キーが設定されているか確認してください。",
     "goBack": "戻る",
+    "showFullPrompt": "プロンプト全文を表示",
+    "showLessPrompt": "折りたたむ",
     "chart": "チャート",
     "trades": "トレード",
     "factor": "ファクター分析",
@@ -621,9 +969,11 @@
     "maxDrawdown": "最大ドローダウン",
     "symbol": "シンボル",
     "weight": "ウェイト",
-    "rebalanceCount": "リバランス回数",
-    "turnoverMean": "平均ターンオーバー",
-    "turnoverMax": "最大ターンオーバー",
+    "rebalanceCount": "目標リバランス回数（要求）",
+    "rebalanceExecuted": "実行されたリバランス数",
+    "rebalanceRealizedTurnover": "実現リバランス回転率",
+    "turnoverMean": "平均ターンオーバー（要求）",
+    "turnoverMax": "最大ターンオーバー（要求）",
     "largestRebalance": "最大リバランス",
     "date": "日付",
     "turnover": "ターンオーバー",
@@ -659,6 +1009,33 @@
     "reproducibility": "再現性",
     "metrics": "メトリクス",
     "validationPayload": "検証",
+    "trust": {
+      "executionRecords": "実行記録",
+      "executionDescription": "記録された実行段階と、入力および結果のハッシュ。",
+      "noExecutionRecords": "この実行の実行記録は保存されていません。",
+      "startedAt": "開始（UTC）",
+      "endedAt": "終了（UTC）",
+      "argsHash": "引数の SHA-256",
+      "resultHash": "結果の SHA-256",
+      "metricEvidence": "指標の根拠",
+      "evidenceDescription": "保存された指標データへの参照です。チェックサムは記録されたファイルを識別します。この画面では独立した検証は行いません。",
+      "noMetricEvidence": "この実行の指標の根拠は記録されていません。",
+      "metric": "指標",
+      "artifact": "成果物",
+      "column": "列",
+      "row": "データ行（1 始まり、ヘッダーを除く）",
+      "artifactHash": "成果物の SHA-256",
+      "tools": {
+        "backtest": "バックテスト",
+        "load_data": "データ読み込み",
+        "generate_signals": "シグナル生成"
+      },
+      "status": {
+        "ok": "完了",
+        "error": "失敗",
+        "cancelled": "キャンセル済み"
+      }
+    },
     "artifactChecksums": "成果物チェックサム",
     "path": "パス",
     "size": "サイズ",
@@ -666,6 +1043,8 @@
     "noBacktestSummary": "バックテストサマリは記録されていません。",
     "noReproducibilityHashes": "再現性ハッシュは記録されていません。",
     "noScalarMetrics": "スカラーメトリクスは記録されていません。",
+    "noStructuredMetrics": "構造化メトリクスは記録されていません。",
+    "structuredMetrics": "構造化メトリクス",
     "noValidationPayload": "検証ペイロードは記録されていません。",
     "noArtifactChecksums": "成果物チェックサムは記録されていません。",
     "noCodeFiles": "コードファイルがありません。",
@@ -733,6 +1112,9 @@
         "crypto": "暗号資産",
         "futures": "先物",
         "forex": "外国為替",
+        "ar_equity": "アルゼンチン株",
+        "uk_equity": "英国株",
+        "vietnam_equity": "ベトナム株",
         "other": "その他"
       }
     },
@@ -1201,7 +1583,15 @@
     "maxPerOrder": "1注文あたり {{amount}} 以下",
     "expiresOn": "有効期限: {{date}}",
     "accountSummary": "{{broker}}・{{type}}口座・資金提供元: {{fundedBy}}",
-    "adjustRequestMessage": "マンデート案「{{label}}」（選択肢 {{ordinal}}）への調整依頼: {{text}}"
+    "adjustRequestMessage": "マンデート案「{{label}}」（選択肢 {{ordinal}}）への調整依頼: {{text}}",
+    "accountLoading": "ブローカーの口座を読み込んでいます…",
+    "accountLoadFailed": "ブローカーの口座を読み込めませんでした: {{error}}",
+    "accountLabel": "このマンデートで取引できる口座",
+    "accountChoose": "口座を選択",
+    "accountDefault": "・ブローカーの既定",
+    "accountDeactivated": "・無効化済み",
+    "accountNotAgentic": "・エージェント取引は許可されていません",
+    "accountHint": "エージェントはこの口座だけで取引します。自動では選択されません。"
   },
   "messageBubble": {
     "elapsedTime": "合計応答時間",
@@ -1399,6 +1789,8 @@
   },
   "runDashboard": {
     "eyebrow": "定量リサーチ · バックテスト",
+    "noBacktestData": "このRunにはグラフ化できるバックテストデータがありません",
+    "noBacktestDataStudioHint": "ポートフォリオ/リスク分析のようです — 数値はStudioタブで確認してください。",
     "engine": "エンジン",
     "portfolio": "ポートフォリオ",
     "systematicStrategy": "システマティック戦略",
@@ -1477,6 +1869,7 @@
       "errorLoad": "ポートフォリオを取得できません",
       "errorRefresh": "更新に失敗しました",
       "errorReconnect": "口座の再接続に失敗しました",
+      "errorReconnectTimeout": "ブラウザー認証がタイムアウトしました。再接続し、ブローカー認証を速やかに完了してください。",
       "errorSaveSettings": "ポートフォリオ設定を保存できません",
       "errorExport": "書き出しに失敗しました"
     },
@@ -1507,7 +1900,8 @@
       "failed": "読み取れませんでした — 合計に含まれていません",
       "lastSuccess": "最後に読み取れたのは {{time}}",
       "noSuccess": "まだ一度も読み取れていません",
-      "reconnect": "再接続"
+      "reconnect": "再接続",
+      "retryRead": "再読み込み"
     },
     "holdings": {
       "title": "保有明細",
@@ -1549,6 +1943,11 @@
     "env": {
       "live": "ライブ",
       "paper": "ペーパー"
+    },
+    "compatibility": {
+      "native": "専用アダプター",
+      "contractTested": "契約テスト済み",
+      "experimental": "実験的"
     },
     "editor": {
       "title": "ポートフォリオの口座を管理",
@@ -1595,14 +1994,31 @@
       "codexBody": "Codex に connector init を実行させ、公式ドキュメントから読み取り用アダプターを実装し、validate を通してから install します。プラグインはリポジトリの外に置かれます。",
       "readOnly": "読み取り専用",
       "credentialSaved": "保存済み",
+      "optional": "（任意）",
+      "authType": "認証方式",
+      "dependency": "ローカル依存関係",
       "oauthNote": "OAuth を使用します。必要に応じて再接続で認可してください。",
       "localNote": "認証情報は既存のローカルコネクタ設定が管理します。",
       "saveVault": "資格情報ストアに保存",
       "savedVault": "認証情報を OS の資格情報ストアに保存しました。",
       "test": "接続テスト",
       "testOk": "{{label}} は正常です。",
+      "testFailed": "{{label}} のテストに失敗しました: {{error}}",
+      "unknownTestError": "コネクターが不明なエラーを返しました。",
       "delete": "削除",
-      "configured": "必要な認証情報は設定済みです"
+      "configured": "必要な認証情報は設定済みです",
+      "accountTitle": "口座",
+      "accountCurrent": "末尾 ····{{last4}} の口座を読み取ります",
+      "accountNone": "口座が選択されていません。選択するまで、この接続は何も読み取りません。",
+      "accountLoad": "口座を選択",
+      "accountChange": "口座を変更",
+      "accountEmpty": "このログインで利用できる口座はありません。",
+      "accountPicker": "このログインで利用できる口座",
+      "accountChoose": "口座を選択",
+      "accountDefault": "・ブローカーの既定",
+      "accountDeactivated": "・無効化済み",
+      "accountSave": "この口座を使う",
+      "accountSaved": "口座を保存しました。"
     }
   }
 }

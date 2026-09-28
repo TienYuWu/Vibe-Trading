@@ -20,6 +20,7 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 
+from backtest.metrics import effective_bars_per_year
 from backtest.models import TradeRecord
 
 
@@ -31,6 +32,7 @@ def monte_carlo_test(
     initial_capital: float,
     n_simulations: int = 1000,
     seed: int = 42,
+    bars_per_year: int = 252,
 ) -> Dict[str, Any]:
     """Shuffle trade PnL order to test path significance.
 
@@ -42,6 +44,8 @@ def monte_carlo_test(
         initial_capital: Starting capital.
         n_simulations: Number of random permutations.
         seed: Random seed for reproducibility.
+        bars_per_year: Annualisation factor (must match bootstrap_sharpe_ci
+            and walk_forward_analysis so the report's Sharpe figures agree).
 
     Returns:
         Dict with actual_sharpe, p_value_sharpe, actual_max_dd,
@@ -58,7 +62,7 @@ def monte_carlo_test(
         return {"error": "need at least 3 trades", "p_value_sharpe": 1.0}
 
     pnls = np.array([t.pnl for t in trades])
-    actual = _path_metrics(pnls, initial_capital)
+    actual = _path_metrics(pnls, initial_capital, bars_per_year)
 
     rng = np.random.default_rng(seed)
     sharpe_count = 0
@@ -73,7 +77,7 @@ def monte_carlo_test(
         shuffled = rng.permutation(pnls)
         if sim_equities is not None:
             sim_equities[i] = initial_capital + np.cumsum(shuffled)
-        sim = _path_metrics(shuffled, initial_capital)
+        sim = _path_metrics(shuffled, initial_capital, bars_per_year)
         sim_sharpes.append(sim["sharpe"])
         if sim["sharpe"] >= actual["sharpe"]:
             sharpe_count += 1
@@ -113,7 +117,9 @@ def monte_carlo_test(
     return result
 
 
-def _path_metrics(pnls: np.ndarray, initial_capital: float) -> Dict[str, float]:
+def _path_metrics(
+    pnls: np.ndarray, initial_capital: float, bars_per_year: int = 252
+) -> Dict[str, float]:
     """Compute Sharpe and max drawdown from a PnL sequence."""
     equity = initial_capital + np.cumsum(pnls)
     if len(equity) > 1:
@@ -123,7 +129,7 @@ def _path_metrics(pnls: np.ndarray, initial_capital: float) -> Dict[str, float]:
     else:
         returns = np.array([0.0])
     std = returns.std()
-    sharpe = float(returns.mean() / (std + 1e-10) * np.sqrt(252))
+    sharpe = float(returns.mean() / (std + 1e-10) * np.sqrt(bars_per_year))
     peak = np.maximum.accumulate(equity)
     dd = (equity - peak) / np.where(peak > 0, peak, 1.0)
     max_dd = float(dd.min())
@@ -293,7 +299,7 @@ def run_validation(
     equity_curve: pd.Series,
     trades: List[TradeRecord],
     initial_capital: float,
-    bars_per_year: int = 252,
+    bars_per_year: int | None = 252,
 ) -> Dict[str, Any]:
     """Run configured validation checks.
 
@@ -315,6 +321,13 @@ def run_validation(
     v_cfg = config.get("validation", {})
     results: Dict[str, Any] = {}
 
+    # Cross-market convention (runner.py passes bars_per_year=None): resolve
+    # it through the shared span-derived factor — otherwise _sharpe's
+    # np.sqrt(bars_per_year) raises TypeError for every validation-enabled
+    # cross-market run.
+    if bars_per_year is None:
+        bars_per_year = effective_bars_per_year(equity_curve.index)
+
     if "monte_carlo" in v_cfg:
         mc_cfg = v_cfg["monte_carlo"] if isinstance(v_cfg["monte_carlo"], dict) else {}
         results["monte_carlo"] = monte_carlo_test(
@@ -322,6 +335,7 @@ def run_validation(
             initial_capital,
             n_simulations=mc_cfg.get("n_simulations", 1000),
             seed=mc_cfg.get("seed", 42),
+            bars_per_year=bars_per_year,
         )
 
     if "bootstrap" in v_cfg:

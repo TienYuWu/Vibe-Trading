@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from src.config.paths import get_runtime_root
+from src.portfolio.compatibility import profile_compatibility
+from src.portfolio.fx import DISPLAY_RATE_CURRENCIES
+from src.portfolio.iso4217 import is_iso_currency
 from src.trading.connections import (
     ConnectionStore,
     is_portfolio_connection_profile,
@@ -84,11 +87,7 @@ def eligible_profiles() -> list[TradingProfile]:
         Eligible profiles sorted by connector, environment and label.
     """
     return sorted(
-        (
-            profile
-            for profile in list_profiles()
-            if is_portfolio_connection_profile(profile)
-        ),
+        (profile for profile in list_profiles() if is_portfolio_connection_profile(profile)),
         key=lambda profile: (profile.connector, profile.environment, profile.label),
     )
 
@@ -113,12 +112,14 @@ def source_catalog(
     rows = []
     for connection in store.public_list():
         source = selected.get(connection["id"])
+        profile = profile_by_id(connection["profile_id"])
         rows.append(
             {
                 **connection,
                 "connection_id": connection["id"],
                 "selected": source is not None,
                 "source_id": source.id if source is not None else None,
+                "portfolio_compatibility": profile_compatibility(profile),
             }
         )
     return rows
@@ -144,8 +145,13 @@ def parse_settings(
     """
     store = connection_store or ConnectionStore()
     currency = str(payload.get("display_currency") or "USD").strip().upper()
-    if currency not in {"USD", "CNY"}:
-        raise ValueError("display_currency must be USD or CNY")
+    if not is_iso_currency(currency):
+        raise ValueError(f"display_currency is not a valid ISO-4217 code: {currency}")
+    if currency not in DISPLAY_RATE_CURRENCIES:
+        supported = ", ".join(sorted(DISPLAY_RATE_CURRENCIES))
+        raise ValueError(
+            f"display_currency {currency} has no production FX rate; choose one of: {supported}"
+        )
 
     raw_sources = payload.get("sources")
     if not isinstance(raw_sources, list):
@@ -158,9 +164,7 @@ def parse_settings(
     for index, raw in enumerate(raw_sources):
         if not isinstance(raw, dict):
             raise ValueError("each portfolio source must be an object")
-        connection_id = (
-            str(raw.get("connection_id") or raw.get("id") or "").strip().lower()
-        )
+        connection_id = str(raw.get("connection_id") or raw.get("id") or "").strip().lower()
         if not _SOURCE_ID_RE.fullmatch(connection_id):
             raise ValueError(f"invalid portfolio connection id: {connection_id or '?'}")
         legacy_profile_id = str(raw.get("profile_id") or "").strip().lower()
@@ -175,20 +179,12 @@ def parse_settings(
             connection = store.get(connection_id)
         profile = profile_by_id(connection.profile_id)
         if profile not in eligible_profiles():
-            raise ValueError(
-                f"connection is not eligible for read-only portfolios: {connection_id}"
-            )
+            raise ValueError(f"connection is not eligible for read-only portfolios: {connection_id}")
         if connection_id in seen_ids:
             raise ValueError("portfolio connection ids must be unique")
         label = str(raw.get("label") or connection.label).strip()
-        if (
-            not label
-            or len(label) > 80
-            or any(ord(character) < 32 for character in label)
-        ):
-            raise ValueError(
-                "portfolio source labels must contain 1 to 80 printable characters"
-            )
+        if not label or len(label) > 80 or any(ord(character) < 32 for character in label):
+            raise ValueError("portfolio source labels must contain 1 to 80 printable characters")
         seen_ids.add(connection_id)
         sources.append(
             PortfolioSource(
@@ -224,9 +220,7 @@ class PortfolioSettingsStore:
                 user's real registry.
         """
         self.path = path or (get_runtime_root() / CONFIG_FILENAME)
-        connection_path = (
-            self.path.with_name("connections.json") if path is not None else None
-        )
+        connection_path = self.path.with_name("connections.json") if path is not None else None
         self.connection_store = connection_store or ConnectionStore(connection_path)
 
     def load(self) -> PortfolioSettings:
@@ -273,9 +267,7 @@ class PortfolioSettingsStore:
             else parse_settings(settings.to_dict(), self.connection_store)
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=".portfolio-", suffix=".json", dir=self.path.parent
-        )
+        descriptor, temporary = tempfile.mkstemp(prefix=".portfolio-", suffix=".json", dir=self.path.parent)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 json.dump(validated.to_dict(), handle, ensure_ascii=False, indent=2)

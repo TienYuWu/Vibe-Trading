@@ -4,14 +4,15 @@ Wraps ``DhanHQ`` client for account, positions, orders, quotes, and historical
 data. Supports NSE/BSE equities and F&O (NIFTY/BANKNIFTY options).
 
 Paper-vs-live: Dhan has no sandbox environment. Paper mode uses the same API
-for market data reads but simulates orders locally. Live mode places real orders
-through Dhan's production API.
+for market data reads but simulates orders locally. Non-paper profiles permit
+reads only; order methods refuse them before any SDK call.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
@@ -32,6 +33,10 @@ DHAN_API_URL = "https://api.dhan.co"
 #: no runtime paper/live discriminator (same token reads the same account), so —
 #: following the Longbridge precedent — the connector is structurally capped at
 #: paper and never opens a live order path.
+#: Prefix of every order id the local paper simulator issues. ``cancel_order``
+#: refuses any other id, because only these orders exist in the simulation.
+_PAPER_ORDER_PREFIX = "PAPER-"
+
 _PAPER_ONLY_ERROR = (
     "Dhan connector is paper-only: it exposes no runtime paper/live "
     "discriminator, so live order placement is not supported. Use a "
@@ -478,10 +483,18 @@ def place_order(
     if type_token not in ("MARKET", "LIMIT"):
         return {"status": "error", "error": "order_type must be 'market' or 'limit'"}
 
-    if quantity is None or float(quantity) <= 0:
-        return {"status": "error", "error": "quantity must be positive"}
+    try:
+        amount = Decimal(str(quantity))
+        valid_quantity = amount.is_finite() and amount >= 1 and amount == amount.to_integral_value()
+    except (InvalidOperation, ValueError):
+        valid_quantity = False
+    if not valid_quantity:
+        return {
+            "status": "error",
+            "error": "quantity must be a positive whole number of shares",
+        }
 
-    qty = int(float(quantity))
+    qty = int(amount)
     sec_id = str(security_id or symbol).strip()
 
     if type_token == "LIMIT" and limit_price is None:
@@ -492,7 +505,7 @@ def place_order(
     # Paper-only: simulate locally (Dhan has no sandbox).
     return {
         "status": "ok",
-        "order_id": f"PAPER-{sec_id}-{side_token}-{qty}",
+        "order_id": f"{_PAPER_ORDER_PREFIX}{sec_id}-{side_token}-{qty}",
         "symbol": clean_symbol,
         "security_id": sec_id,
         "side": side_token.lower(),
@@ -528,6 +541,17 @@ def cancel_order(
     clean_id = str(order_id or "").strip()
     if not clean_id:
         return {"status": "error", "error": "order_id is required"}
+    if not clean_id.startswith(_PAPER_ORDER_PREFIX):
+        # The paper profile reads the real account, so a live order's id can
+        # arrive here; acknowledging it would report a cancel that never
+        # happened while the real order keeps working.
+        return {
+            "status": "error",
+            "error": (
+                f"order {clean_id!r} was not issued by this paper simulator, so it "
+                "cannot be cancelled here; cancel a real order with the broker"
+            ),
+        }
 
     return {
         "status": "ok",

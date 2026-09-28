@@ -15,7 +15,6 @@ from src.providers.capabilities import (
 
 EXPECTED_PROVIDER_DEFAULTS = {
     "openrouter": "deepseek/deepseek-v4-pro",
-    "requesty": "openai/gpt-4o-mini",
     "openai": "gpt-5.5",
     "anthropic": "claude-sonnet-4-6",
     "openai-codex": "openai-codex/gpt-5.4",
@@ -177,3 +176,19 @@ def test_credential_fallback_map_matches_provider_catalog() -> None:
         for item in json.loads(providers_path.read_text(encoding="utf-8"))
     }
     assert _provider_default_base_urls() == catalog
+
+
+def test_env_example_default_matches_provider_registry():
+    agent_root = Path(__file__).resolve().parents[1]
+    assignments = dict(line.split("=", 1) for line in
+                       (agent_root / ".env.example").read_text().splitlines()
+                       if line.startswith(("LANGCHAIN_PROVIDER=", "LANGCHAIN_MODEL_NAME=")))
+    providers = json.loads((agent_root / "src/providers/llm_providers.json").read_text())
+    provider = next(p for p in providers if p["name"] == assignments["LANGCHAIN_PROVIDER"])
+    assert assignments["LANGCHAIN_MODEL_NAME"] == provider["default_model"]
+
+
+def test_direct_deepseek_suggests_current_flash_name():
+    provider = next(p for p in ONBOARD_PROVIDERS if p.key == "deepseek")
+    assert "deepseek-flash" in provider.suggested_models
+    assert "deepseek-v4-flash" not in provider.suggested_models

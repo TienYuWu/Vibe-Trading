@@ -15,6 +15,7 @@ from src.quantlib.crossvalidation import (
     DEFAULT_EMBARGO_FRACTION,
     MIN_FOLDS,
     Split,
+    _as_label_spans,
     combinatorial_purged_splits,
     detect_boundary_leakage,
     group_purged_kfold_splits,
@@ -384,3 +385,31 @@ def test_group_purged_kfold_splits_input_validation():
         list(group_purged_kfold_splits([1, 1, 2, 2], n_folds=5))
     with pytest.raises(ValueError, match="groups array cannot be empty"):
         list(group_purged_kfold_splits([], n_folds=2))
+
+
+def test_timestamp_label_index_must_be_ordered_and_unique():
+    index = pd.to_datetime(["2024-01-01", "2024-01-03", "2024-01-02", "2024-01-04"])
+    ends = pd.Series(index, index=index)
+    with pytest.raises(ValueError, match="monotonically increasing"):
+        list(purged_kfold_splits(len(index), ends, n_folds=2))
+
+    duplicate = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-02", "2024-01-03"])
+    ends = pd.Series(duplicate, index=duplicate)
+    with pytest.raises(ValueError, match="unique"):
+        list(purged_kfold_splits(len(duplicate), ends, n_folds=2))
+
+
+
+def test_a_timestamp_label_cannot_end_before_it_starts():
+    """The positional branch rejected this; the Series branch clipped it to its start."""
+    index = pd.date_range("2024-01-01", periods=4)
+    ends = pd.Series([index[1], index[0], index[3], index[3]], index=index)
+    with pytest.raises(ValueError, match="cannot end before"):
+        list(purged_kfold_splits(len(index), ends, n_folds=2))
+
+
+def test_a_nat_label_end_purges_through_the_last_observation():
+    """NaT is the tail of ``shift(-h)``: a label resolving after the sample ends."""
+    index = pd.date_range("2024-01-01", periods=4)
+    ends = pd.Series([index[1], pd.NaT, index[3], index[3]], index=index)
+    assert _as_label_spans(ends).tolist() == [1, 3, 3, 3]

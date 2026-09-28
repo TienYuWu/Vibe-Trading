@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { RunDetail } from "../RunDetail";
 import type { RunData } from "@/lib/api";
@@ -142,6 +142,41 @@ describe("RunDetail page", () => {
     expect(screen.queryByText("OLD_CODE")).not.toBeInTheDocument();
   });
 
+  it("collapses an expanded prompt when navigating to another run", async () => {
+    const firstPrompt = "First run prompt\n".repeat(8).trim();
+    const secondPrompt = "Second run prompt\n".repeat(8).trim();
+    apiMock.getRun.mockImplementation((runId: string) => Promise.resolve({
+      status: "success",
+      run_id: runId,
+      prompt: runId === "first" ? firstPrompt : secondPrompt,
+    }));
+    apiMock.getRunCode.mockResolvedValue({});
+
+    const router = renderRunDetail("/runs/first");
+    const expandButton = await screen.findByRole("button", { name: "Show full prompt" });
+    const firstPromptElement = expandButton.previousElementSibling;
+    expect(firstPromptElement).toHaveTextContent("First run prompt");
+    expect(firstPromptElement).toHaveClass("line-clamp-3");
+    expect(expandButton).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expandButton);
+    expect(firstPromptElement).not.toHaveClass("line-clamp-3");
+    expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    await act(async () => {
+      await router.navigate("/runs/second");
+    });
+
+    const secondExpandButton = await screen.findByRole("button", { name: "Show full prompt" });
+    const secondPromptElement = secondExpandButton.previousElementSibling;
+    expect(secondPromptElement).toHaveTextContent("Second run prompt");
+    expect(secondPromptElement).toHaveClass("line-clamp-3");
+    expect(secondExpandButton).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("ignores a chart response that finishes after the route changes", async () => {
     const oldChart = deferred<RunData>();
     apiMock.getRun.mockImplementation((runId: string, params: Record<string, string>) => {
@@ -241,6 +276,124 @@ describe("RunDetail page", () => {
     expect(screen.getByText("artifacts/result.json")).toHaveClass("ps-4");
   });
 
+  it("renders structured metrics that the scalar `metrics` block cannot hold", async () => {
+    // #1235/#1274: the sleeve a plan rejection dropped is dict-shaped, so it
+    // never reaches `metrics`. It must still be readable in the card, not just
+    // present in the JSON.
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "structured",
+      prompt: "Structured card",
+      run_card: {
+        metrics: { sharpe: 1.42 },
+        structured_metrics: {
+          unfilled_plan_rejections_by_symbol: { BIL: { zero_size: 12 } },
+          dropped_target_adjustments: [],
+          _omitted: ["by_symbol"],
+        },
+      } as NonNullable<RunData["run_card"]>,
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+
+    renderRunDetail("/runs/structured");
+
+    await screen.findByText("Structured card");
+    fireEvent.click(screen.getByRole("tab", { name: "Run Card" }));
+
+    expect(
+      await screen.findByText("unfilled_plan_rejections_by_symbol"),
+    ).toBeInTheDocument();
+    expect(screen.getByText('{"BIL":{"zero_size":12}}')).toBeInTheDocument();
+    // an empty list must read as "none", not as a blank cell that looks missing
+    expect(screen.getByText("[]")).toBeInTheDocument();
+    // the record of what the block dropped is surfaced too, as JSON
+    expect(screen.getByText('["by_symbol"]')).toBeInTheDocument();
+  });
+
+  it("shows the structured-metrics empty state when the card carries none", async () => {
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "scalar-only",
+      prompt: "Scalar only",
+      run_card: { metrics: { sharpe: 1.42 } } as NonNullable<RunData["run_card"]>,
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+
+    renderRunDetail("/runs/scalar-only");
+
+    await screen.findByText("Scalar only");
+    fireEvent.click(screen.getByRole("tab", { name: "Run Card" }));
+
+    expect(await screen.findByText("No structured metrics recorded.")).toBeInTheDocument();
+  });
+
+  it("renders execution status, UTC times and complete metric evidence hashes", async () => {
+    const argsHash = "a".repeat(64);
+    const resultHash = "b".repeat(64);
+    const artifactHash = "c".repeat(64);
+    const runCard: NonNullable<RunData["run_card"]> = {
+      schema_version: "v1",
+      tool_traces: [
+        { tool: "load_data", started_at: "2026-09-27T01:00:00Z", ended_at: "2026-09-27T01:00:01Z", status: "ok", args_hash: argsHash, result_hash: resultHash },
+        { tool: "generate_signals", started_at: "2026-09-27T01:00:02Z", ended_at: "2026-09-27T01:00:03Z", status: "error", args_hash: "d".repeat(64), result_hash: "e".repeat(64) },
+        { tool: "backtest", started_at: "2026-09-27T01:00:04Z", ended_at: "2026-09-27T01:00:05Z", status: "cancelled", args_hash: "f".repeat(64), result_hash: "0".repeat(64) },
+      ],
+      citations: [{ metric: "sharpe", artifact_id: "artifacts/metrics.csv", column: "sharpe", row: 1, sha256: artifactHash }],
+    };
+    apiMock.getRun.mockResolvedValue({ status: "success", run_id: "trust", prompt: "Evidence run", run_card: runCard });
+    apiMock.getRunCode.mockResolvedValue({});
+    renderRunDetail("/runs/trust");
+    fireEvent.click(await screen.findByRole("tab", { name: "Run Card" }));
+
+    const executions = screen.getByText("Execution records").closest("section")!;
+    expect(within(executions).getByText("Load data")).toBeInTheDocument();
+    expect(within(executions).getByText("Generate signals")).toBeInTheDocument();
+    expect(within(executions).getByText("Backtest")).toBeInTheDocument();
+    for (const status of ["Completed", "Failed", "Cancelled"]) {
+      expect(within(executions).getByText(status)).toBeInTheDocument();
+    }
+    expect(within(executions).getByText("2026-09-27T01:00:00Z")).toHaveAttribute("dateTime", "2026-09-27T01:00:00Z");
+    expect(within(executions).getByText("2026-09-27T01:00:01Z")).toBeInTheDocument();
+    expect(within(executions).getByText(argsHash)).toHaveClass("break-all");
+    expect(within(executions).getByText(resultHash)).toBeInTheDocument();
+
+    const evidence = screen.getByText("Metric evidence").closest("section")!;
+    expect(within(evidence).getAllByText("sharpe")).toHaveLength(2);
+    expect(within(evidence).getByText("artifacts/metrics.csv")).toBeInTheDocument();
+    expect(within(evidence).getByText("Data row (1-based, excluding header)")).toBeInTheDocument();
+    expect(within(evidence).getByText("1")).toBeInTheDocument();
+    expect(within(evidence).getByText(artifactHash)).toHaveClass("break-all");
+    expect(within(evidence).getByText(/does not independently verify/)).toBeInTheDocument();
+    expect(within(evidence).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { schema_version: "v0", metrics: { sharpe: 1.42 } },
+    { schema_version: "v1", tool_traces: [], citations: [] },
+  ])("explicitly reports absent evidence for $schema_version cards", async (runCard) => {
+    apiMock.getRun.mockResolvedValue({ status: "success", run_id: "no-evidence", prompt: "No evidence", run_card: runCard });
+    apiMock.getRunCode.mockResolvedValue({});
+    renderRunDetail("/runs/no-evidence");
+    fireEvent.click(await screen.findByRole("tab", { name: "Run Card" }));
+    expect(screen.getByText("Execution records were not recorded for this run.")).toBeInTheDocument();
+    expect(screen.getByText("Metric evidence was not recorded for this run.")).toBeInTheDocument();
+    if (runCard.schema_version === "v0") expect(screen.getByText("1.4200")).toBeInTheDocument();
+  });
+
+  it("renders artifact references as inert text", async () => {
+    const unsafeReference = "javascript:alert('<img src=x onerror=alert(1)>')";
+    apiMock.getRun.mockResolvedValue({
+      status: "success", run_id: "inert", prompt: "Inert references",
+      run_card: { citations: [{ metric: "return", artifact_id: unsafeReference, column: "return", row: 1, sha256: "a".repeat(64) }] },
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+    renderRunDetail("/runs/inert");
+    fireEvent.click(await screen.findByRole("tab", { name: "Run Card" }));
+    const evidence = screen.getByText("Metric evidence").closest("section")!;
+    expect(within(evidence).getByText(unsafeReference)).toBeInTheDocument();
+    expect(evidence.querySelector("a, img")).toBeNull();
+  });
+
   it("renders the Factor Research tab from has_factor_artifacts and lazy-loads the report", async () => {
     apiMock.getRun.mockResolvedValue({
       status: "success",
@@ -308,7 +461,7 @@ describe("RunDetail page", () => {
         rebalances: [
           { date: "2026-02-02", turnover: 0.35, entries: [{ code: "NVDA", to: 0.6 }], exits: [], top_moves: [] },
         ],
-        summary: { rebalance_count: 1, turnover_total: 0.35, turnover_mean: 0.35, turnover_max: 0.35, largest_rebalance_date: "2026-02-02" },
+        summary: { target_change_count: 1, turnover_total: 0.35, turnover_mean: 0.35, turnover_max: 0.35, largest_rebalance_date: "2026-02-02", rebalance_executed_fills: 4, rebalance_realized_turnover: 0.2 },
       },
     });
     apiMock.getRunCode.mockResolvedValue({});
@@ -328,6 +481,31 @@ describe("RunDetail page", () => {
     expect(screen.getAllByText("2026-02-02")).toHaveLength(2);
     // 35.0% shows up three times: the table row plus the mean and max summary cards
     expect(screen.getAllByText("35.0%")).toHaveLength(3);
+    // execution evidence is shown separately from the requested count (#1275)
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("20.0%")).toBeInTheDocument();
+  });
+
+  it("renders the requested count from legacy rebalance_count for old artifacts", async () => {
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "legacy-run",
+      prompt: "Legacy run",
+      rebalance_notes: {
+        rebalances: [],
+        summary: { rebalance_count: 7, turnover_total: 0.1, turnover_mean: 0.1, turnover_max: 0.1, largest_rebalance_date: "2026-02-02" },
+      },
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+
+    renderRunDetail("/runs/legacy-run");
+
+    await screen.findByText("Legacy run");
+    fireEvent.click(screen.getByRole("tab", { name: "Portfolio Studio" }));
+    await screen.findByText("Rebalance Notes");
+
+    // old artifacts carry only rebalance_count; the fallback keeps them readable
+    expect(screen.getByText("7")).toBeInTheDocument();
   });
 
   it("hides the Portfolio Studio tab when the payloads are absent", async () => {

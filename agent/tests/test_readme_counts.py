@@ -52,6 +52,7 @@ READMES = (
     "README_ko.md",
     "README_ar.md",
     "README_es.md",
+    "README_id.md",
 )
 
 # Feature badges in the order they appear in every README. Each entry is the
@@ -69,8 +70,9 @@ BADGE_ORDER = ("skills", "brokers", "presets", "alphas", "engines", "quantlib")
 # must equal the number of distinct connectors the profile registry exposes.
 # Without that guard the count tests only prove the five READMEs agree with
 # each other, which they did while all five were uniformly wrong — eToro
-# shipped as the 13th connector and the pin stayed at 12.
-EXPECTED_BROKERS = 13
+# shipped as the 13th connector and the pin stayed at 12. Same again for
+# KIS, Upbit, Toss and Scalable Capital, which landed together as 15-18.
+EXPECTED_BROKERS = 18
 
 
 def _read(name: str) -> str:
@@ -153,6 +155,34 @@ def _quantlib_export_count() -> int:
         if exported:
             total += len(exported)
     return total
+
+
+def _quantlib_module_count() -> int:
+    """Count the `src/quantlib` submodules the badge claims.
+
+    Counted the same way the function total is: a submodule that exports an
+    `__all__` is one module of the library. The badge states both numbers and
+    only the function half was ever guarded, so four modules landed while the
+    badge still said nineteen — the count was right about functions and wrong
+    about modules for as long as nobody read it.
+
+    Returns:
+        Number of `quantlib` submodules exporting `__all__`.
+    """
+    import importlib
+    import pkgutil
+
+    if str(AGENT_DIR) not in sys.path:
+        sys.path.insert(0, str(AGENT_DIR))
+    quantlib = importlib.import_module("src.quantlib")
+
+    return len(
+        [
+            module
+            for module in pkgutil.walk_packages(quantlib.__path__, "src.quantlib.")
+            if getattr(importlib.import_module(module.name), "__all__", None)
+        ]
+    )
 
 
 def _counts() -> dict[str, int]:
@@ -271,7 +301,9 @@ def _keyless_agent_tool_count() -> int:
     Measured in a child interpreter, not in-process: ``_discover_subclasses``
     walks ``BaseTool.__subclasses__()`` and caches the result, so a stub tool
     class defined by any earlier test in the session would be counted too
-    (the full suite measured 107 where a clean process measures 106). Shell
+    (when this was written the full suite measured 107 against a clean
+    process's 106 — do not read those as the current count, only as the size
+    of the contamination). Shell
     tools stay off (as they are for ``serve``), and every credential-gated
     tool is hidden by clearing its gate, so the number does not depend on
     which API keys happen to be configured on the machine running the suite.
@@ -324,6 +356,20 @@ def test_feature_badges_state_the_real_counts(name: str) -> None:
         assert str(counts[key]) in _numbers(badge), (
             f"{name}: {key} badge says {badge!r}, code ships {counts[key]}"
         )
+
+
+@pytest.mark.parametrize("name", READMES)
+def test_quantlib_badge_states_both_the_function_and_module_counts(name: str) -> None:
+    """The Quant Library badge carries two numbers; both must be the real ones."""
+    badge = _badges(_read(name))[BADGE_ORDER.index("quantlib")]
+
+    assert _numbers(badge) == {
+        str(_quantlib_export_count()),
+        str(_quantlib_module_count()),
+    }, (
+        f"{name}: quantlib badge says {badge!r}, code ships "
+        f"{_quantlib_export_count()} functions across {_quantlib_module_count()} modules"
+    )
 
 
 @pytest.mark.parametrize("name", READMES)
@@ -504,3 +550,131 @@ def test_all_readmes_agree_with_each_other() -> None:
     for index, key in enumerate(BADGE_ORDER):
         stale = [name for name, badges in per_file.items() if str(counts[key]) not in badges[index]]
         assert not stale, f"{key}: {stale} disagree with the other locales"
+
+
+# ── loader tree line ──────────────────────────────────────────────────────
+
+_LOADER_TREE_RE = re.compile(
+    r"├── loaders/\s*#\s*(?P<count>\d+)\s*\S*[:：]\s*(?P<names>.+)"
+)
+# The six READMEs each carry a repo-tree line that both COUNTS and NAMES the
+# loaders. Nothing pinned it, so it drifted: it read "24 sources" and omitted
+# nobitex, wallex and tickerall while the registry held 27. The count tests
+# only proved the READMEs agreed with each other, and they agreed while all six
+# were wrong — the same failure mode the broker pin above was added for.
+#
+# This asserts against the live registry rather than a constant, so the tree
+# line cannot drift from the code without a test naming the missing source.
+
+
+def _readme_loader_names(text: str) -> list[str]:
+    """Return the loader names a README's tree line lists, in order."""
+    match = _LOADER_TREE_RE.search(text)
+    assert match, "no loaders tree line found"
+    raw = match.group("names")
+    # zh/ja use the ideographic comma; the rest use ASCII.
+    names = [part.strip() for part in re.split(r"[,、]", raw)]
+    return [n for n in names if n]
+
+
+@pytest.mark.parametrize("readme", READMES)
+def test_readme_loader_tree_line_matches_the_registry(readme: str) -> None:
+    """Every README's loaders line must name exactly the registered sources."""
+    from backtest.loaders.registry import LOADER_REGISTRY, _ensure_registered
+
+    _ensure_registered()
+    registered = set(LOADER_REGISTRY)
+
+    text = _read(readme)
+    match = _LOADER_TREE_RE.search(text)
+    assert match, f"{readme}: no loaders tree line"
+    listed = _readme_loader_names(text)
+
+    assert set(listed) == registered, (
+        f"{readme}: tree line names {sorted(set(listed) ^ registered)} "
+        "differently from the loader registry"
+    )
+    assert len(listed) == len(registered), f"{readme}: duplicate name in the tree line"
+    assert int(match.group("count")) == len(registered), (
+        f"{readme}: tree line says {match.group('count')} sources, "
+        f"the registry has {len(registered)}"
+    )
+
+# ---------------------------------------------------------------------------
+# The Data Sources section and the engines tree line
+#
+# `test_readme_loader_tree_line_matches_the_registry` guarded the loaders line
+# of the repo tree, and only that line. The prose two hundred lines above it
+# and the table directly beneath were left unguarded, so they drifted exactly
+# as far as nothing was checking: the intro claimed "23 free market-data
+# sources" against a registry of 27, contradicting the tree line in the same
+# file, and `nobitex` / `wallex` never reached the table at all. The engines
+# tree line said 8 where the code shipped 9 plus the composite, while the
+# feature badge — which is checked — said 10.
+#
+# Anchors are code literals (`source: "auto"`, `engines/`, a backticked
+# source name) so they survive translation, per this file's founding
+# constraint.
+# ---------------------------------------------------------------------------
+
+_SOURCE_INTRO_ANCHOR = 'source: "auto"'
+_ENGINE_TREE_RE = re.compile(r"^│\s+├── engines/\s+#\s+(?P<count>\d+)\s", re.M)
+
+
+def _source_intro_line(text: str) -> str:
+    """Return the Data Sources intro paragraph.
+
+    ``source: "auto"`` appears twice — the intro and a later usage example —
+    and the intro is the first. Anchoring on the literal rather than the
+    heading keeps this locale-independent.
+    """
+    hits = [line for line in text.splitlines() if _SOURCE_INTRO_ANCHOR in line]
+    assert hits, "no Data Sources intro line"
+    return hits[0]
+
+
+@pytest.mark.parametrize("readme", READMES)
+def test_data_sources_prose_states_the_real_source_count(readme: str) -> None:
+    """The headline source count must be the registry's, in every language."""
+    from backtest.loaders.registry import LOADER_REGISTRY, _ensure_registered
+
+    _ensure_registered()
+    line = _source_intro_line(_read(readme))
+    bold = " ".join(re.findall(r"\*\*(.+?)\*\*", line))
+    assert str(len(LOADER_REGISTRY)) in _numbers(bold), (
+        f"{readme}: the Data Sources intro states "
+        f"{sorted(_numbers(bold))} where the registry has {len(LOADER_REGISTRY)}"
+    )
+
+
+@pytest.mark.parametrize("readme", READMES)
+def test_every_registered_source_appears_in_the_data_sources_table(readme: str) -> None:
+    """A source the loader can serve but the table never names is invisible.
+
+    The reader picks a source from this table; one that ships without a row
+    is shipped to nobody. Checked against the registry rather than against
+    the other READMEs, so all six being uniformly wrong still fails.
+    """
+    from backtest.loaders.registry import LOADER_REGISTRY, _ensure_registered
+
+    _ensure_registered()
+    rows = [l for l in _read(readme).splitlines() if l.startswith("| `")]
+    table = " ".join(rows)
+    missing = sorted(n for n in LOADER_REGISTRY if f"`{n}`" not in table)
+    assert not missing, f"{readme}: sources missing from the Data Sources table: {missing}"
+
+
+@pytest.mark.parametrize("readme", READMES)
+def test_repo_tree_states_the_real_engine_count(readme: str) -> None:
+    """The engines tree line names the composite engine separately.
+
+    `_engine_count()` counts every market engine including `composite`, and
+    the tree line reads "N engines + composite ... + options_portfolio", so
+    the number it carries is one less than that count.
+    """
+    match = _ENGINE_TREE_RE.search(_read(readme))
+    assert match, f"{readme}: no engines tree line"
+    assert int(match.group("count")) == _engine_count() - 1, (
+        f"{readme}: engines tree line says {match.group('count')}, "
+        f"the code ships {_engine_count() - 1} plus the composite engine"
+    )

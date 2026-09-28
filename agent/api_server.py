@@ -237,6 +237,8 @@ from src.api.uploads_routes import (  # noqa: F401, E402
 # --- Channels ---
 from src.api.channels_routes import register_channels_routes  # noqa: E402
 register_channels_routes(app)
+from src.api.channels_config_routes import register_channels_config_routes  # noqa: E402
+register_channels_config_routes(app)
 from src.api.qveris_routes import qveris_router  # noqa: E402  # QVERIS-INTEGRATION
 app.include_router(qveris_router)  # QVERIS-INTEGRATION
 
@@ -277,6 +279,8 @@ from src.api.live_routes import (  # noqa: F401, E402
     _runner_factory,
     _emit_live_event,
     _fetch_broker_ceilings,
+    _live_account_choices,
+    _mandate_account_ref,
     _known_live_brokers,
     _oauth_token_present,
     _active_mandate_state,

@@ -2,7 +2,7 @@
 
 The setting has two mutually exclusive delivery paths:
 
-* Relays that require an opt-in (OpenRouter, Requesty) receive
+* Relays that require an opt-in (OpenRouter) receive
   ``extra_body={"reasoning": {"effort": ...}}``.
 * ChatOpenAI-compatible providers receive a top-level ``reasoning_effort``. Its ``gpt-5.6-*``
   models reject function tools on ``/v1/chat/completions`` without one::
@@ -478,7 +478,7 @@ class TestAnthropicNativeProvider:
 
 
 class TestRelayOptIn:
-    """OpenRouter/Requesty keep the pre-existing extra_body opt-in."""
+    """OpenRouter keeps the pre-existing extra_body opt-in."""
 
     def test_openrouter_keeps_extra_body_and_no_top_level_field(self) -> None:
         kwargs = _capture_kwargs(
@@ -495,35 +495,40 @@ class TestRelayOptIn:
         assert kwargs["extra_body"] == {"reasoning": {"effort": "high"}}
         assert kwargs["reasoning_effort"] is None
 
-    def test_requesty_keeps_extra_body_and_no_top_level_field(self) -> None:
-        kwargs = _capture_kwargs(
-            {
-                "LANGCHAIN_PROVIDER": "requesty",
-                "REQUESTY_API_KEY": "rq-test",
-                "REQUESTY_BASE_URL": "https://router.requesty.ai/v1",
-                "LANGCHAIN_MODEL_NAME": "openai/gpt-4o-mini",
-                "LANGCHAIN_REASONING_EFFORT": "medium",
-                "LANGCHAIN_USE_RESPONSES_API": "false",
-            }
-        )
-
-        assert kwargs["extra_body"] == {"reasoning": {"effort": "medium"}}
-        assert kwargs["reasoning_effort"] is None
-
 
 class TestRequestPayload:
-    """The kwarg has to survive as a top-level chat-completions request field."""
+    """The kwarg has to survive as a top-level chat-completions request field.
 
-    def _payload(self, effort: str | None) -> dict[str, Any]:
-        """Serialize a one-message request with the given effort kwarg."""
+    Every instance here pins ``use_responses_api=False`` because that is what
+    ``build_llm`` does: it always passes the resolved boolean from
+    ``uses_responses_api`` (never ``None``), so the transport is never left to
+    the library to guess. langchain-openai 1.6 started auto-routing some model
+    names to the Responses API when the flag is unset, which serializes
+    ``{"reasoning": {"effort": ...}}`` into an ``input`` request instead of a
+    top-level ``reasoning_effort`` on a ``messages`` request. Constructing
+    without the flag here tested the library's default, not our wire format.
+    """
+
+    def _payload(
+        self, effort: str | None, *, model: str = "gpt-5.6-sol"
+    ) -> dict[str, Any]:
+        """Serialize a one-message chat-completions request with the effort kwarg."""
         if llm_mod.ChatOpenAIWithReasoning is None:
             pytest.skip("langchain-openai is not installed")
         from langchain_core.messages import HumanMessage
 
         instance = llm_mod.ChatOpenAIWithReasoning(
-            model="gpt-5.6-sol", api_key="sk-test", reasoning_effort=effort
+            model=model,
+            api_key="sk-test",
+            reasoning_effort=effort,
+            use_responses_api=False,
         )
-        return instance._get_request_payload([HumanMessage(content="hi")])
+        payload = instance._get_request_payload([HumanMessage(content="hi")])
+        # Assert the transport before reading its fields: a Responses payload
+        # carries ``input`` and would fail the effort assertions below with a
+        # bare KeyError that names the field rather than the transport.
+        assert "messages" in payload, sorted(payload)
+        return payload
 
     def test_explicit_none_reaches_the_request(self) -> None:
         assert self._payload("none")["reasoning_effort"] == "none"
@@ -533,19 +538,23 @@ class TestRequestPayload:
         assert "reasoning_effort" not in self._payload(None)
 
     def test_deepseek_flash_effort_is_serialized_for_chat_completions(self) -> None:
-        if llm_mod.ChatOpenAIWithReasoning is None:
-            pytest.skip("langchain-openai is not installed")
-        from langchain_core.messages import HumanMessage
-
-        instance = llm_mod.ChatOpenAIWithReasoning(
-            model="deepseek-v4-flash-0731",
-            api_key="sk-test",
-            reasoning_effort="max",
-        )
-
-        payload = instance._get_request_payload([HumanMessage(content="hi")])
+        payload = self._payload("max", model="deepseek-v4-flash-0731")
 
         assert payload["reasoning_effort"] == "max"
+
+    def test_build_llm_pins_the_transport_it_serializes_for(self) -> None:
+        """The pin above must mirror build_llm, not just make the test pass."""
+        kwargs = _capture_kwargs(
+            {
+                "LANGCHAIN_PROVIDER": "openai",
+                "OPENAI_API_KEY": "sk-test",
+                "LANGCHAIN_MODEL_NAME": "gpt-5.6-sol",
+                "LANGCHAIN_REASONING_EFFORT": "none",
+            }
+        )
+
+        assert kwargs["use_responses_api"] is False
+        assert kwargs["reasoning_effort"] == "none"
 
 
 class TestResponsesAPI:

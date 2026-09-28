@@ -18,11 +18,11 @@ from unittest.mock import patch
 
 import pytest
 
-from src.agent.grounding import (
+from src.agent.grounding import GroundingLedger
+from src.agent.grounding.release import (
     MAX_GROUNDING_RECOVERY_ROUNDS,
     MAX_PRICE_EVIDENCE_ATTEMPTS,
     MAX_SYMBOL_RESOLUTION_ATTEMPTS,
-    GroundingLedger,
 )
 from src.providers.chat import LLMResponse
 from tests.message_roles_helpers import assert_system_messages_only_lead
@@ -234,7 +234,7 @@ class TestRecoveryAction:
         validation = ledger.validate_final_answer("机器人ETF 现价 1.171。")
 
         with patch.multiple(
-            "src.agent.grounding",
+            "src.agent.grounding.release",
             MAX_SYMBOL_RESOLUTION_ATTEMPTS=10_000,
             MAX_PRICE_EVIDENCE_ATTEMPTS=10_000,
         ):
@@ -350,7 +350,12 @@ class _FailingDraftLLM:
         return LLMResponse(content="")
 
 
-def _run_direct_loop(tmp_path: Path, llm: Any, max_iterations: int = 8) -> dict[str, Any]:
+def _run_direct_loop(
+    tmp_path: Path,
+    llm: Any,
+    max_iterations: int = 8,
+    events: list[tuple[str, dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     from src.agent.loop import AgentLoop
     from src.memory.persistent import PersistentMemory
     from src.tools import build_registry
@@ -361,6 +366,9 @@ def _run_direct_loop(tmp_path: Path, llm: Any, max_iterations: int = 8) -> dict[
         llm=llm,
         max_iterations=max_iterations,
         persistent_memory=pm,
+        event_callback=(lambda event, data: events.append((event, data)))
+        if events is not None
+        else None,
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -375,16 +383,30 @@ def test_loop_runs_recovery_before_fallback(
     from src.agent.trace import TraceWriter
 
     llm = _FailingDraftLLM()
+    events: list[tuple[str, dict[str, Any]]] = []
 
-    result = _run_direct_loop(tmp_path, llm, max_iterations=6)
+    result = _run_direct_loop(tmp_path, llm, max_iterations=6, events=events)
 
     trace = TraceWriter.read(tmp_path / "run")
     recovery_entries = [e for e in trace if e.get("type") == "grounding_recovery"]
     # Symbol resolution budget is two: two recovery turns, then fallback.
     assert [e.get("action") for e in recovery_entries] == ["search_symbol", "search_symbol"]
-    assert llm.calls >= 3
+    # Two recovery drafts, then the correction path: one draft handed back
+    # and the one that ends revising. Recovery does not spend the revision
+    # cap, and every rejection that leads to another draft is announced.
+    assert llm.calls == 4
+    statuses = [data for event, data in events if event == "grounding_status"]
+    assert [(status["stage"], status["round"]) for status in statuses] == [
+        ("revising", 1),
+        ("revising", 2),
+        ("revising", 3),
+    ]
     # Recovery and correction steering must never be mid-conversation system
     # messages: Anthropic only accepts a single leading system block.
     assert_system_messages_only_lead(llm.messages_history)
-    # The run still terminates fail-closed once recovery is exhausted.
+    # The run still terminates fail-closed once recovery is exhausted: with no
+    # observed price at all there is nothing a redacted release could stand
+    # on, so the canned refusal is the answer, not a cut-down draft.
     assert result["content"]
+    assert "安全门槛拒绝" in result["content"]
+    assert result.get("degraded") is True

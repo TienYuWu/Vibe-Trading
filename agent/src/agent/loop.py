@@ -14,6 +14,7 @@ Tool execution:
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import copy
 import json
 import logging
@@ -25,12 +26,14 @@ import threading
 import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from src.agent.context import ContextBuilder
 from src.agent.grounding import GroundingLedger
+from src.agent.grounding.release import MAX_GROUNDING_REVISIONS
 from src.agent.memory import WorkspaceMemory
 from src.agent.progress import HeartbeatTimer, ProgressEvent, _set_emitter
+from src.agent.tool_progress import RECOVERY_MESSAGE, ToolProgress
 from src.agent.tools import ToolRegistry
 from src.agent.trace import TraceWriter
 from src.core.state import RunStateStore
@@ -41,6 +44,7 @@ from src.goal.context import (
     goal_progress_tuple,
 )
 from src.providers.chat import ChatLLM, LLMRuntimeSnapshot, ProviderStreamError
+from src.providers.session_context import bind_llm_session_id, reset_llm_session_id
 from src.providers.content_filter import (
     CONTENT_FILTER_SKIP_MESSAGE,
     MAX_CONSECUTIVE_CONTENT_FILTER_SKIPS,
@@ -63,12 +67,25 @@ COLLAPSE_TEXT_MIN = 2400
 COLLAPSE_HEAD = 900
 COLLAPSE_TAIL = 500
 
+# The stub ``_fix_tool_pairs`` inserts for a call whose result a layer-3 fold
+# consumed. The other "data is gone" placeholder is layer 1's cleared marker,
+# which is not a constant — it embeds the original payload length, so it is
+# built by ``_cleared_text`` and matched by ``_is_cleared``.
+_STUB_RESULT_CONTENT = "[Result from earlier context — see summary above]"
+
 TAIL_TOKEN_BUDGET = 20_000
 SUMMARY_CHUNK_CHARS = 80_000
 
 # An LLM may return a transient empty completion (no text, no tool calls);
 # retry once with a nudge before failing the run on a second consecutive one.
 MAX_CONSECUTIVE_EMPTY_RESPONSE_SKIPS = 1
+
+# Compaction recovery is a bounded reliability aid, not an alternate research
+# loop: a run restores at most this many lost readonly payloads from its replay
+# cache. Past the cap a lost call runs again as it does without replay, so the
+# model is never told to use a result it can no longer see, and a loop of
+# identical re-runs still ends at the no-progress limit.
+MAX_READONLY_REPLAY_RECOVERIES = 6
 
 
 def _override(name: str):
@@ -109,6 +126,37 @@ def _stream_retry_delay_s() -> float:
         return ov
     from src.config.accessor import get_env_config
     return get_env_config().agent_tuning.vt_stream_retry_delay_s
+
+
+def _stream_retry_max_delay_s() -> float:
+    ov = _override("STREAM_RETRY_MAX_DELAY_S")
+    if ov is not None:
+        return ov
+    from src.config.accessor import get_env_config
+    return get_env_config().agent_tuning.vt_stream_retry_max_delay_s
+
+
+def _stream_retry_backoff_s(streak: int) -> float:
+    """Return the capped exponential delay for the one-based failure streak.
+
+    Doubles per consecutive retryable stream failure (1.0s, 2.0s, 4.0s, ...)
+    so a sustained provider outage backs off instead of burning the retry
+    budget at a constant cadence. The exponent is clamped at 62 (mirroring
+    ``src/swarm/runtime.py``'s worker-level backoff) and the result is capped
+    at ``_stream_retry_max_delay_s()``.
+
+    Args:
+        streak: Number of consecutive retryable stream failures including the
+            current one; values below 1 are treated as 1.
+
+    Returns:
+        Seconds to sleep before the stream retry, never negative.
+    """
+    ceiling = min(
+        _stream_retry_delay_s() * (2 ** min(max(streak, 1) - 1, 62)),
+        _stream_retry_max_delay_s(),
+    )
+    return max(ceiling, 0.0)
 
 
 def _tool_timeout_seconds() -> float:
@@ -186,11 +234,21 @@ def _normalize_llm_usage(usage: Any) -> dict[str, int] | None:
         total_tokens = input_tokens + output_tokens
     if not (input_tokens or output_tokens or total_tokens):
         return None
-    return {
+    normalized: dict[str, int] = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
     }
+    details = usage.get("input_token_details")
+    if isinstance(details, dict):
+        if details.get("cache_read") is not None:
+            normalized["cache_read_tokens"] = _coerce_usage_int(details["cache_read"])
+        creation_keys = ("cache_creation", "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+        if any(details.get(key) is not None for key in creation_keys):
+            normalized["cache_creation_tokens"] = sum(
+                _coerce_usage_int(details.get(key)) for key in creation_keys
+            )
+    return normalized
 
 
 def _new_llm_usage_summary(llm: Any) -> dict[str, Any]:
@@ -228,6 +286,9 @@ def _record_llm_usage(
     totals["output_tokens"] = int(totals.get("output_tokens") or 0) + normalized["output_tokens"]
     totals["total_tokens"] = int(totals.get("total_tokens") or 0) + normalized["total_tokens"]
     totals["calls"] = int(totals.get("calls") or 0) + 1
+    for key in ("cache_read_tokens", "cache_creation_tokens"):
+        if key in normalized:
+            totals[key] = int(totals.get(key) or 0) + normalized[key]
     summary.setdefault("per_iteration", []).append({"iter": iteration, **normalized})
     summary["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -491,19 +552,102 @@ def _verification_ledger(messages: list) -> str:
             break
     return "\n".join(unique)
 
-def _microcompact(messages: list) -> None:
+# Marker written over a tool result whose payload layer 1 removed. Matched by
+# PREFIX because the text carries the original length, so no two cleared
+# results are the same string; never compare a content to it with ``==``.
+_CLEARED_PREFIX = "[CLEARED FROM CONTEXT:"
+
+
+def _cleared_text(original_len: int) -> str:
+    """Build the self-describing placeholder that replaces a pruned result."""
+    return (
+        f"{_CLEARED_PREFIX} this tool call SUCCEEDED and returned "
+        f"{original_len} characters, which were removed to free context "
+        "space. This is NOT a tool failure and NOT an empty result. If you "
+        "need these values, request the same tool call again; the loop may "
+        "restore the prior successful result without refetching it.]"
+    )
+
+
+def _is_cleared(content: Any) -> bool:
+    """True when ``content`` is a layer-1 cleared-result marker."""
+    return isinstance(content, str) and content.startswith(_CLEARED_PREFIX)
+
+
+def _replay_context_result(result: str) -> str:
+    """Annotate a restored readonly result with planner guidance.
+
+    Replay exists to recover evidence that context compaction removed, not to
+    trigger another fetch under slightly different freshness arguments. Keep
+    the original payload intact and add a reserved metadata field when the
+    result is a JSON object; non-JSON results get a short textual suffix.
+    """
+    notice = (
+        "Exact prior successful result restored after context compaction. "
+        "Treat this payload as available evidence and continue the analysis. "
+        "Do not change cache/freshness arguments merely to bypass replay; "
+        "request a fresh fetch only when the evidence itself is stale/cached "
+        "or the task genuinely requires newer data."
+    )
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return f"{result}\n\n[Replay notice: {notice}]"
+    if not isinstance(payload, dict):
+        return f"{result}\n\n[Replay notice: {notice}]"
+    replay_payload = dict(payload)
+    replay_payload["_vibe_replay"] = {
+        "restored": True,
+        "notice": notice,
+    }
+    return json.dumps(replay_payload, ensure_ascii=False)
+
+
+def _microcompact(messages: list) -> list:
     """Layer 1: silently prune old tool results, keeping the most recent N intact.
 
     Args:
         messages: Message list (mutated in place).
+
+    Returns:
+        Names of tools whose every result just became unreadable (legacy
+        helper contract). The loop reconciles its dedup ledger separately by
+        exact successful call identity, not by these tool names.
     """
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     if len(tool_msgs) <= KEEP_RECENT:
-        return
+        return []
+    newly_cleared = []
     for msg in tool_msgs[:-KEEP_RECENT]:
         content = msg.get("content", "")
-        if isinstance(content, str) and len(content) > 100:
-            msg["content"] = "[cleared]"
+        # Skip a result already cleared: the marker is itself >100 chars, so
+        # re-clearing it would rewrite the recorded original size with the
+        # MARKER's length ("returned 287 characters") and re-report the tool
+        # as newly unreadable on every later pass.
+        if isinstance(content, str) and len(content) > 100 and not _is_cleared(content):
+            # A bare "[cleared]" is indistinguishable from a tool that
+            # returned nothing, so the model reports "no data was retrieved"
+            # for data it did receive and this layer then deleted. Say which
+            # it is, and say the result is recoverable.
+            msg["content"] = _cleared_text(len(content))
+            if msg.get("name"):
+                newly_cleared.append(msg["name"])
+    # Identified by prefix, not equality: the marker carries the original
+    # length, so every cleared result is a different string.
+    surviving = {m.get("name") for m in tool_msgs if not _is_cleared(m.get("content"))}
+    return sorted(set(newly_cleared) - surviving)
+
+
+def _result_data_gone(content: Any) -> bool:
+    """True when a tool result's real data is gone from context.
+
+    Two sources, and they must both be recognised: layer 1 overwrites an old
+    result with the ``_CLEARED_PREFIX`` marker, and ``_fix_tool_pairs``
+    inserts ``_STUB_RESULT_CONTENT`` for a call whose result a layer-3 fold
+    consumed. The marker is matched by prefix, never equality — it embeds the
+    original payload length, so no two cleared results are the same string.
+    """
+    return _is_cleared(content) or content == _STUB_RESULT_CONTENT
 
 
 def _context_collapse(messages: list) -> None:
@@ -521,12 +665,85 @@ def _context_collapse(messages: list) -> None:
         content = msg.get("content")
         if not isinstance(content, str) or len(content) <= COLLAPSE_TEXT_MIN:
             continue
-        if content == "[cleared]":
+        if _result_data_gone(content):
             continue
         head = content[:COLLAPSE_HEAD]
         tail = content[-COLLAPSE_TAIL:]
         trimmed = len(content) - COLLAPSE_HEAD - COLLAPSE_TAIL
         msg["content"] = f"{head}\n\n...[{trimmed} chars collapsed]...\n\n{tail}"
+
+    # Zero-cost relief for oversized tool-call payloads whose paired result
+    # was already compacted away (``[cleared]``): the arguments blob is now
+    # useless to the model (the data it requested is gone), so fold it to a
+    # valid JSON stub. The call id/name survive, so tool pairing and the
+    # model's "I called tool X" memory are intact, and the provider still
+    # receives well-formed ``arguments``. Nothing re-reads historical
+    # arguments for re-dispatch, so this is safe.
+    cleared_ids = {
+        m.get("tool_call_id")
+        for m in messages
+        if m.get("role") == "tool" and _result_data_gone(m.get("content"))
+    }
+    for msg in messages[1:-COLLAPSE_PRESERVE_RECENT]:
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function")
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments")
+            if (
+                isinstance(args, str)
+                and len(args) > COLLAPSE_TEXT_MIN
+                and tc.get("id") in cleared_ids
+            ):
+                fn["arguments"] = "{}"
+
+
+def _msg_estimate_chars(msg: dict) -> int:
+    """Rough character size of a message for token budgeting.
+
+    Sizes ``content`` plus ``reasoning_content`` plus every tool-call
+    ``arguments`` payload. Assistant tool-call messages carry their payload in
+    ``tool_calls[].function.arguments`` with empty ``content``; sizing them by
+    content alone made the layer-3 tail budget count a 100 KB arguments blob
+    as ~10 tokens. A thinking-model turn's ``reasoning_content`` (Kimi K2.5,
+    DeepSeek reasoner, Qwen thinking) is the same failure mode: ``estimate_tokens``
+    counts it via full JSON serialization, so leaving it out here undercounts
+    the tail relative to the trigger that decided compaction was needed.
+    """
+    size = len(str(msg.get("content", "")))
+    reasoning_content = msg.get("reasoning_content")
+    if reasoning_content is not None:
+        size += len(str(reasoning_content))
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function")
+        if isinstance(fn, dict) and fn.get("arguments") is not None:
+            # Sized via ``str`` (matches ``estimate_tokens``' full-serialization
+            # gate) so dict/object arguments count instead of being ignored.
+            size += len(str(fn["arguments"]))
+    return size
+
+
+def _tail_cut_index(body: list, budget: int = TAIL_TOKEN_BUDGET) -> int:
+    """First index of the preserved ``body`` tail that fits ``budget`` tokens.
+
+    Walks back from the end accumulating each message's estimated tokens and
+    returns the earliest index that fits, never splitting a tool_call /
+    tool_result pair. Sized with ``_msg_estimate_chars`` so oversized tool-call
+    arguments push their message into the folded head instead of being counted
+    as a handful of tokens in the preserved tail.
+    """
+    accumulated = 0
+    cut_idx = len(body)
+    for i in range(len(body) - 1, -1, -1):
+        msg_tokens = (_msg_estimate_chars(body[i]) // 4) + 10
+        if accumulated + msg_tokens > budget:
+            cut_idx = i + 1
+            break
+        accumulated += msg_tokens
+        cut_idx = i
+    while 0 < cut_idx < len(body) and body[cut_idx].get("role") == "tool":
+        cut_idx += 1
+    return cut_idx
 
 
 def _fix_tool_pairs(messages: list) -> None:
@@ -577,7 +794,7 @@ def _fix_tool_pairs(messages: list) -> None:
                     "role": "tool",
                     "tool_call_id": tc_id,
                     "name": tc.get("function", {}).get("name", "unknown"),
-                    "content": "[Result from earlier context — see summary above]",
+                    "content": _STUB_RESULT_CONTENT,
                 }
                 inserts.append((idx + 1, stub))
                 result_ids.add(tc_id)
@@ -771,14 +988,15 @@ def _looks_like_tool_call_syntax(content: str) -> bool:
     )
 
 
-
-
 # Task target-file detection: a user message usually names the file to
 # create or update ("update C:\\...\\plan.md"). If a run approaches its
 # iteration cap without having written that file, the loop must remind the
 # model instead of ending "answered but incomplete".
+# Windows absolute paths may contain spaces (e.g. C:\Users\Emad Karimi\...),
+# so the drive-letter branch allows spaces and stops non-greedily at the first
+# ".md"; the POSIX and bare-name branches stay space-free word matches.
 _TARGET_PATH_RE = re.compile(
-    r"[A-Za-z]:\\[^\s\x22\x27<>|?*]+\.md\b"
+    r"[A-Za-z]:\\[^<>|?*\x22\x27\r\n]+?\.md\b"
     r"|/[\w./\\-]+\.md\b"
     r"|\b[\w./\\-]+\.md\b"
 )
@@ -919,7 +1137,7 @@ def _archive_backtest_result(result: str, active_run_dir: str | None) -> bool:
         if source_dir.is_dir():
             shutil.copytree(source_dir, target / directory, dirs_exist_ok=True)
             archived += [
-                str(path.relative_to(source))
+                path.relative_to(source).as_posix()
                 for path in source_dir.rglob("*")
                 if path.is_file()
             ]
@@ -993,7 +1211,21 @@ class AgentLoop:
         self.memory = memory or WorkspaceMemory()
         self._event_callback = event_callback
         self.max_iterations = max_iterations
-        self._called_ok: set[str] = set()
+        # Dedup identity is (tool name, canonical arguments) -- NOT the name
+        # alone. Keying on the name blocked every legitimate second call to a
+        # paginated or parameterised tool: get_financial_statements(
+        # statement='income') then (statement='balance') is one name but two
+        # different requests, and the second was answered with a synthetic
+        # 'already completed successfully' skip. The model then correctly
+        # reported that the balance sheet 'returned no readable content' -- a
+        # true statement about a fabricated tool result.
+        # Keys come from _identical_call_key, the same canonicaliser the
+        # deterministic cache uses, so the block path and the cache path can
+        # never disagree about what 'the same call' means.
+        self._called_ok: set[tuple[str, str]] = set()
+        # Capture successful identities before context collapse can stub args.
+        # Skipped/error call IDs never enter this ledger.
+        self._successful_call_keys: dict[str, tuple[str, str]] = {}
         self._cancel_event = threading.Event()
         self._previous_summary: str = ""
         self._persistent_memory = persistent_memory
@@ -1013,6 +1245,15 @@ class AgentLoop:
         # 5-9x each (2026-08-20 INTC run) because it could no longer see its
         # own verification records.
         self._called_identical: dict[tuple[str, str], str] = {}
+        # Successful readonly results are retained only for this run. If
+        # compaction removes the visible result, an exact repeat can restore it
+        # without hitting the external source again. Repeatable tools require an
+        # explicit replay policy for persistent post-compaction replay.
+        self._readonly_replay_cache: dict[tuple[str, str], str] = {}
+        self._readonly_replay_ready: set[tuple[str, str]] = set()
+        self._readonly_replay_protected: set[tuple[str, str]] = set()
+        self._readonly_replay_recoveries = 0
+        self._tool_progress = ToolProgress()
 
     def cancel(self) -> None:
         """Cancel the current loop.
@@ -1083,6 +1324,27 @@ class AgentLoop:
     def run(self, user_message: str, history: Optional[List[Dict[str, Any]]] = None, session_id: str = "") -> Dict[str, Any]:
         """Run the ReAct loop synchronously.
 
+        Binds ``session_id`` as the active LLM session for the whole run so
+        provider adapters that need a stable per-conversation identity
+        (OpenCode Go's ``x-opencode-session``) can read it at request time.
+
+        Args:
+            user_message: User message.
+            history: Prior conversation messages.
+            session_id: Session ID.
+
+        Returns:
+            Execution result dict.
+        """
+        token = bind_llm_session_id(session_id)
+        try:
+            return self._run_bound(user_message, history, session_id)
+        finally:
+            reset_llm_session_id(token)
+
+    def _run_bound(self, user_message: str, history: Optional[List[Dict[str, Any]]] = None, session_id: str = "") -> Dict[str, Any]:
+        """Run the ReAct loop with the LLM session already bound.
+
         Args:
             user_message: User message.
             history: Prior conversation messages.
@@ -1099,6 +1361,7 @@ class AgentLoop:
         else:
             self._has_run = True
         self._called_ok = set()
+        self._successful_call_keys = {}
         self._previous_summary = ""
         self._released_fallback = False
         self._released_fallback_reason = None
@@ -1107,6 +1370,11 @@ class AgentLoop:
         self._last_activity_wall = _time.time()
         self._run_done = threading.Event()
         self._called_identical = {}
+        self._readonly_replay_cache = {}
+        self._readonly_replay_ready = set()
+        self._readonly_replay_protected = set()
+        self._readonly_replay_recoveries = 0
+        self._tool_progress = ToolProgress()
         run_started_wall = _time.time()
 
         state_store = RunStateStore()
@@ -1123,6 +1391,9 @@ class AgentLoop:
             run_dir=run_dir,
             user_message=user_message,
             history=history,
+            contextual_identity_constraints=(
+                get_env_config().agent_tuning.vibe_contextual_identity_constraints
+            ),
         )
 
         context = ContextBuilder(self.registry, self.memory,
@@ -1163,11 +1434,18 @@ class AgentLoop:
 
         iteration = 0
         final_content = ""
+        no_progress_reason: str | None = None
         content_filter_count = 0
         consecutive_content_filter_count = 0
         content_filter_circuit_breaker = False
         empty_model_response_iter: int | None = None
         consecutive_empty_responses = 0
+        grounding_revisions = 0
+        # A normal grounding correction is a text revision, not a new research
+        # turn. Explicit grounding recovery (identity / missing price evidence)
+        # keeps tools available; ordinary correction turns do not.
+        grounding_correction_text_only = False
+        pending_grounding_draft = ""
         llm_usage_summary = _new_llm_usage_summary(self.llm)
         last_response_model: str | None = None
         goal_continuations = 0
@@ -1188,6 +1466,7 @@ class AgentLoop:
             )
             watchdog.start()
 
+        stream_failure_streak = 0
         try:
             while iteration < self.max_iterations:
                 if self._cancel_event.is_set():
@@ -1215,7 +1494,7 @@ class AgentLoop:
                 # tool history available for the model to reference instead of
                 # having every result past the most recent few cleared.
                 if tokens > int(_token_threshold() * 0.5):
-                    _microcompact(messages)
+                    self._microcompact_and_unblock(messages, trace, iteration)
                     tokens = estimate_tokens(messages)
 
                 # Layer 2: context collapse (fold long text, zero API cost)
@@ -1287,10 +1566,41 @@ class AgentLoop:
                     self._grounding and self._grounding.should_buffer_output
                 )
 
+                streamed_chars = 0
+                stream_total = 0
+                stream_frozen = False
+
                 def _on_text_chunk(delta: str) -> None:
+                    nonlocal streamed_chars, stream_total, stream_frozen
                     thinking_chunks.append(delta)
-                    if not buffer_text_output:
+                    stream_total += len(delta)
+                    if buffer_text_output or stream_frozen:
+                        return
+                    # Neither the figures block nor an unchecked measurement streams
+                    # (see streamable_length). Only a fence character or a digit
+                    # can hold text back, so any other chunk is emitted as it
+                    # arrives instead of re-parsing the whole answer.
+                    if streamed_chars + len(delta) == stream_total and not any(
+                        char in "`~" or char.isdigit() for char in delta
+                    ):
                         self._emit("text_delta", {"delta": delta, "iter": current_iter})
+                        streamed_chars = stream_total
+                        return
+                    text = "".join(thinking_chunks)
+                    safe = (
+                        self._grounding.streamable_length(text)
+                        if self._grounding is not None
+                        else len(text)
+                    )
+                    if self._grounding is not None and safe < len(text):
+                        # Held at a measurement: nothing after it streams this turn.
+                        stream_frozen = self._grounding.measurement_start(text) == safe
+                    if safe > streamed_chars:
+                        self._emit(
+                            "text_delta",
+                            {"delta": text[streamed_chars:safe], "iter": current_iter},
+                        )
+                        streamed_chars = safe
 
                 def _on_reasoning_chunk(delta: str) -> None:
                     # Throttled: long reasoning streams produce hundreds of
@@ -1319,11 +1629,26 @@ class AgentLoop:
                         reasoning_event["tail"] = reasoning_tail
                     self._emit("reasoning_delta", reasoning_event)
 
-                # On last iteration, drop tool definitions to force text output
+                # The final iteration is always text-only. A grounding correction
+                # whose validator requested no explicit recovery is text-only too:
+                # the model must revise from evidence already gathered instead of
+                # starting another research/refetch loop merely to reformat a draft.
                 is_last_iteration = (iteration == self.max_iterations)
-                tool_defs = None if is_last_iteration else self.registry.get_definitions()
+                correction_text_only = grounding_correction_text_only
+                tool_defs = (
+                    None
+                    if is_last_iteration or correction_text_only
+                    else self.registry.get_definitions()
+                )
                 if is_last_iteration:
                     trace.write({"type": "forced_text_only", "iter": current_iter})
+                elif correction_text_only:
+                    trace.write(
+                        {
+                            "type": "grounding_correction_text_only",
+                            "iter": current_iter,
+                        }
+                    )
 
                 _llm_timeout_s = _llm_timeout_seconds()
                 llm_timeout = _llm_timeout_s if _llm_timeout_s > 0 else None
@@ -1343,12 +1668,23 @@ class AgentLoop:
                     # reset, relay hiccup) — mirrors the swarm worker policy.
                     # Deterministic 4xx errors fail immediately. Deltas from
                     # the failed attempt are dropped so the trace does not
-                    # contain duplicated thinking text.
+                    # contain duplicated thinking text. The delay escalates
+                    # across consecutive retryable failures, honoring the
+                    # provider's Retry-After header (bounded by the configured
+                    # cap) when present. A successful retry does not reset the
+                    # streak — only a clean first-attempt success does.
                     if not exc.retryable:
                         raise
+                    stream_failure_streak += 1
+                    retry_delay_s = (
+                        min(exc.retry_after_s, _stream_retry_max_delay_s())
+                        if exc.retry_after_s is not None
+                        else _stream_retry_backoff_s(stream_failure_streak)
+                    )
                     logger.warning(
-                        "Provider stream failed (iter %s), retrying once: %s",
+                        "Provider stream failed (iter %s), retrying once in %.2fs: %s",
                         current_iter,
+                        retry_delay_s,
                         exc,
                     )
                     self._emit(
@@ -1358,12 +1694,23 @@ class AgentLoop:
                             "reason": "provider_stream_retry",
                             "provider": exc.provider,
                             "model": exc.model,
+                            "retry_delay_s": retry_delay_s,
                         },
                     )
                     thinking_chunks.clear()
+                    streamed_chars = 0
+                    stream_total = 0
+                    stream_frozen = False
                     reasoning_chars = 0
                     last_reasoning_emit = None
-                    _time.sleep(_stream_retry_delay_s())
+                    # Wait on the cancel event, not time.sleep: the delay now
+                    # escalates to the configured cap (30s by default) and a
+                    # provider Retry-After can ask for that much on the first
+                    # failure. A blocking sleep would make Stop take that long
+                    # to be observed; the event returns the moment it is set.
+                    self._cancel_event.wait(retry_delay_s)
+                    if self._cancel_event.is_set():
+                        break
                     response = self.llm.stream_chat(
                         messages,
                         tools=tool_defs,
@@ -1373,6 +1720,8 @@ class AgentLoop:
                         idle_timeout_s=llm_timeout,
                         should_cancel=self._cancel_event.is_set,
                     )
+                else:
+                    stream_failure_streak = 0
 
                 # Cancelled mid-stream: discard this turn's partial response and
                 # end the run now, without executing any of its tool calls.
@@ -1436,7 +1785,14 @@ class AgentLoop:
                     if not buffer_text_output:
                         self._emit(
                             "thinking_done",
-                            {"iter": current_iter, "content": thinking_text[:500]},
+                            {
+                                "iter": current_iter,
+                                "content": (
+                                    thinking_text[: self._grounding.streamable_length(thinking_text)]
+                                    if self._grounding is not None
+                                    else thinking_text
+                                )[:500],
+                            },
                         )
 
                 # Content-filter skip: provider blocked the response — continue
@@ -1465,8 +1821,47 @@ class AgentLoop:
                 # Not filtered — reset the consecutive-skip counter.
                 consecutive_content_filter_count = 0
 
-                if not response.has_tool_calls:
-                    final_content = response.content or ""
+                forced_grounding_release = False
+                if correction_text_only and response.has_tool_calls:
+                    # An unoffered call consumes the same bounded correction
+                    # budget as an invalid revised draft, but is never executed
+                    # or inserted into the transcript as an unanswered tool call.
+                    grounding_revisions += 1
+                    trace.write(
+                        {
+                            "type": "grounding_correction_tool_call_blocked",
+                            "iter": current_iter,
+                            "round": grounding_revisions,
+                        }
+                    )
+                    if streamed_chars:
+                        self._emit(
+                            "stream_reset",
+                            {"iter": current_iter, "reason": "grounding_tool_call_blocked"},
+                        )
+                    forced_grounding_release = (
+                        grounding_revisions >= MAX_GROUNDING_REVISIONS
+                        or iteration == self.max_iterations
+                    )
+                    if not forced_grounding_release:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "<system>This is a grounding correction turn. "
+                                    "Do not call tools. Revise the previous draft using "
+                                    "the evidence already gathered, or remove claims "
+                                    "that cannot be supported.</system>"
+                                ),
+                            }
+                        )
+                        continue
+
+                if forced_grounding_release or not response.has_tool_calls:
+                    # At the cap, release the last actual draft through the
+                    # existing gate. The forbidden call's text is not an answer.
+                    final_content = pending_grounding_draft if forced_grounding_release else response.content or ""
+                    syntax_fallback_emitted = False
                     if not final_content:
                         empty_model_response_iter = iteration
                         trace.write(
@@ -1543,30 +1938,75 @@ class AgentLoop:
                             "text_delta",
                             {"delta": final_content, "iter": current_iter},
                         )
+                        syntax_fallback_emitted = True
                     if self._grounding is not None:
-                        validation = self._grounding.validate_final_answer(final_content)
+                        validation = (
+                            self._grounding.revalidate(final_content)
+                            if forced_grounding_release
+                            else self._grounding.validate_final_answer(final_content)
+                        )
                         if not validation.valid:
-                            trace.write_text_entry(
-                                {
-                                    "type": "answer_rejected",
-                                    "iter": current_iter,
-                                    "issues": validation.issues,
-                                },
-                                field="content",
-                                value=final_content,
-                                offload_kind=f"answer-rejected-{current_iter}",
+                            # A draft whose only defect is a missing provenance
+                            # word (source / currency / symbol suffix) gets the
+                            # word appended, not another multi-minute model round.
+                            repaired = self._grounding.repair_provenance(
+                                final_content, validation
                             )
-                            react_trace.append(
-                                {
-                                    "type": "answer_rejected",
-                                    "issues": validation.issues,
-                                }
-                            )
-                            messages.append(
-                                {"role": "assistant", "content": final_content}
-                            )
+                            if repaired is not None:
+                                # Non-recording: no model round produced this
+                                # text, and ``validation_count`` is the
+                                # rejected-draft number the user is shown.
+                                recheck = self._grounding.revalidate(repaired)
+                                if recheck.valid:
+                                    trace.write(
+                                        {
+                                            "type": "answer_repaired",
+                                            "iter": current_iter,
+                                            "issues": validation.issues,
+                                        }
+                                    )
+                                    react_trace.append(
+                                        {"type": "answer_repaired", "issues": validation.issues}
+                                    )
+                                    final_content = repaired
+                                    validation = recheck
+                        if validation.valid:
+                            # The figures block is the model's declaration to
+                            # the gate, not answer text.
+                            final_content = validation.released_text
+                        if not validation.valid:
+                            if not forced_grounding_release:
+                                trace.write_text_entry(
+                                    {
+                                        "type": "answer_rejected",
+                                        "iter": current_iter,
+                                        "issues": validation.issues,
+                                    },
+                                    field="content",
+                                    value=final_content,
+                                    offload_kind=f"answer-rejected-{current_iter}",
+                                )
+                                if not buffer_text_output and streamed_chars:
+                                    # The stream showed this draft up to its first unchecked
+                                    # number; the next draft or the released answer replaces it.
+                                    self._emit(
+                                        "stream_reset",
+                                        {"iter": current_iter, "reason": "grounding_rejected"},
+                                    )
+                                react_trace.append(
+                                    {
+                                        "type": "answer_rejected",
+                                        "issues": validation.issues,
+                                    }
+                                )
+                                messages.append(
+                                    {"role": "assistant", "content": final_content}
+                                )
                             recovery = self._grounding.recovery_action(validation)
-                            if recovery is not None and iteration < self.max_iterations:
+                            if not forced_grounding_release and recovery is not None and iteration < self.max_iterations:
+                                # Explicit bounded recovery is the one case where
+                                # the next turn is allowed to research again.
+                                grounding_correction_text_only = False
                                 self._grounding.record_recovery(recovery)
                                 trace.write(
                                     {
@@ -1584,39 +2024,131 @@ class AgentLoop:
                                         "content": f"<system>{self._grounding.recovery_prompt(recovery, validation)}</system>",
                                     }
                                 )
+                                self._emit(
+                                    "grounding_status",
+                                    {
+                                        "stage": "revising",
+                                        "round": self._grounding.validation_count,
+                                        "issues": len(validation.issues),
+                                    },
+                                )
                                 final_content = ""
                                 continue
-                            messages.append(
-                                {
-                                    "role": "user",
-                                    "content": f"<system>{self._grounding.correction_prompt(validation)}</system>",
-                                }
-                            )
+                            if not forced_grounding_release:
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": f"<system>{self._grounding.correction_prompt(validation)}</system>",
+                                    }
+                                )
+                            rejected_draft = final_content
+                            pending_grounding_draft = rejected_draft
                             final_content = ""
-                            # One extra revision when real iteration budget remains;
-                            # each revision costs one iteration, so without budget the
-                            # run must stop revising and release the safe fallback.
-                            revision_cap = 4 if self.max_iterations - iteration >= 3 else 3
+                            # The budget counts drafts rejected on this
+                            # correction path; the last one is released with
+                            # its figures cut. A draft that triggered bounded
+                            # recovery is not counted (it re-fetches evidence
+                            # rather than rewording), so a run that had to
+                            # resolve its symbol first still gets a corrected
+                            # draft.
+                            if not forced_grounding_release:
+                                grounding_revisions += 1
                             if (
-                                iteration < self.max_iterations
-                                and self._grounding.validation_count < revision_cap
+                                not forced_grounding_release
+                                and iteration < self.max_iterations
+                                and grounding_revisions < MAX_GROUNDING_REVISIONS
                             ):
+                                grounding_correction_text_only = True
+                                self._emit(
+                                    "grounding_status",
+                                    {
+                                        "stage": "revising",
+                                        "round": self._grounding.validation_count,
+                                        "issues": len(validation.issues),
+                                    },
+                                )
                                 continue
-                            final_content = self._grounding.safe_fallback()
+                            # Out of revisions. The last draft is still the
+                            # analysis the user waited minutes for; release it
+                            # with the rejected figures cut out and re-checked
+                            # by the same gate. The canned refusal is only for
+                            # what cannot be cut: an identity finding, a run
+                            # that never observed a price, or a cut that still
+                            # fails validation.
+                            rejected_drafts = self._grounding.validation_count
+                            released = self._grounding.redacted_release(
+                                rejected_draft, validation
+                            )
+                            if released is not None:
+                                trace.write(
+                                    {
+                                        "type": "answer_released_redacted",
+                                        "iter": current_iter,
+                                        "issues": validation.issues,
+                                    }
+                                )
+                                react_trace.append(
+                                    {
+                                        "type": "answer_released_redacted",
+                                        "issues": validation.issues,
+                                    }
+                                )
+                                final_content = released
+                                self._emit(
+                                    "grounding_status",
+                                    {
+                                        "stage": "released_redacted",
+                                        "removed": self._grounding.figures_removed,
+                                    },
+                                )
+                                self._released_fallback_reason = (
+                                    "final answer released with unverified figures "
+                                    f"redacted after {rejected_drafts} rejected drafts"
+                                )
+                            else:
+                                final_content = self._grounding.safe_fallback()
+                                # Captured HERE, beside the redacted branch's
+                                # own count. Left unset, the reason was built
+                                # lazily at the end of the run from a
+                                # ``validation_count`` the release path's
+                                # rechecks had already moved.
+                                self._released_fallback_reason = (
+                                    "final answer degraded to the deterministic "
+                                    f"fallback after {rejected_drafts} rejected "
+                                    "drafts could not be corrected within the "
+                                    "iteration budget"
+                                )
                             self._released_fallback = True
                             self._emit(
                                 "text_delta",
                                 {"delta": final_content, "iter": current_iter},
                             )
-                        elif buffer_text_output:
+                        elif buffer_text_output and not syntax_fallback_emitted:
                             self._emit(
                                 "text_delta",
                                 {"delta": final_content, "iter": current_iter},
                             )
+                        elif not self._released_fallback and not syntax_fallback_emitted:
+                            # Flush a held-back last line that never became a
+                            # figures fence; a stripped block leaves nothing.
+                            shown = "".join(thinking_chunks)[:streamed_chars]
+                            if not final_content.startswith(shown):
+                                # Stripping the block also trims the blank lines
+                                # the stream already showed before its fence.
+                                shown = shown.rstrip()
+                            if final_content.startswith(shown) and len(final_content) > len(shown):
+                                self._emit(
+                                    "text_delta",
+                                    {"delta": final_content[len(shown):], "iter": current_iter},
+                                )
+                    # The correction has ended. A goal continuation is a new
+                    # research turn and must regain its normal tool access.
+                    grounding_correction_text_only = False
+                    pending_grounding_draft = ""
                     should_continue_goal = False
                     continuation_snapshot = None
                     _max_cont = _goal_max_continuations()
-                    if active_goal_id and session_id and _max_cont > 0:
+                    if not forced_grounding_release and active_goal_id and session_id and _max_cont > 0:
                         try:
                             if goal_store is None:
                                 from src.goal import GoalStore
@@ -1698,6 +2230,17 @@ class AgentLoop:
                     react_trace.append({"type": "answer", "content": final_content[:500]})
                     break
 
+                if not buffer_text_output and self._grounding is not None:
+                    # The turn is over, so a held-back last line is complete: it is
+                    # shown unless it opens a figures block.
+                    turn_text = "".join(thinking_chunks)
+                    safe = min(len(turn_text), self._grounding.streamable_length(turn_text + "\n"))
+                    if safe > streamed_chars:
+                        self._emit(
+                            "text_delta",
+                            {"delta": turn_text[streamed_chars:safe], "iter": current_iter},
+                        )
+                        streamed_chars = safe
                 assistant_message = context.format_assistant_tool_calls(
                     response.tool_calls,
                     content=response.content,
@@ -1710,6 +2253,31 @@ class AgentLoop:
                 compact_requested, focus_topic = self._process_tool_calls(
                     response.tool_calls, context, messages, trace, react_trace, current_iter,
                 )
+
+                if (
+                    not self._cancel_event.is_set()
+                    and self._tool_progress.finish_iteration()
+                ):
+                    no_progress_reason = "no_progress: " + RECOVERY_MESSAGE
+                    final_content = RECOVERY_MESSAGE
+                    trace.write(
+                        {
+                            "type": "no_progress",
+                            "iter": current_iter,
+                            "iterations_without_progress": self._tool_progress.stalled_iterations,
+                        }
+                    )
+                    trace.write_text_entry(
+                        {"type": "answer", "iter": current_iter},
+                        field="content",
+                        value=final_content,
+                        offload_kind=f"answer-{current_iter}",
+                    )
+                    react_trace.append({"type": "answer", "content": final_content})
+                    self._emit(
+                        "text_delta", {"delta": final_content, "iter": current_iter}
+                    )
+                    break
 
                 # Layer 3: compress after all tools have executed
                 if compact_requested:
@@ -1752,6 +2320,10 @@ class AgentLoop:
             final_reason = "cancelled by user"
             state_store.mark_cancelled(run_dir, final_reason)
             final_status = "cancelled"
+        elif no_progress_reason is not None:
+            final_reason = no_progress_reason
+            state_store.mark_failure(run_dir, final_reason)
+            final_status = "failed"
         elif content_filter_circuit_breaker:
             final_reason = (
                 f"content_filter_circuit_breaker: "
@@ -1965,14 +2537,30 @@ class AgentLoop:
 
             tool_def = self.registry.get(tc.name)
             is_repeatable = tool_def.repeatable if tool_def else False
-            if tc.name in self._called_ok and not is_repeatable:
-                logger.warning(f"Blocked duplicate call: {tc.name} (already succeeded)")
-                skip_msg = json.dumps({"skipped": True, "reason": f"{tc.name} already completed successfully. Use the previous result."})
-                messages.append(context.format_tool_result(tc.id, tc.name, skip_msg))
-                trace.write({"type": "tool_skipped", "iter": iteration, "tool": tc.name})
-                react_trace.append({"type": "tool_skipped", "tool": tc.name})
+            # A None key means the arguments could not be canonicalised. The
+            # deterministic cache treats that as 'never cache'; the blocking
+            # gate must likewise treat it as 'never block', otherwise every
+            # un-serialisable call would collapse into a single identity and
+            # the second one would be skipped without ever running.
+            dedup_key = self._identical_call_key(tc.name, tc.arguments)
+            if dedup_key is not None and self._tool_progress.is_blocked(dedup_key):
+                failed_result = json.dumps(
+                    {
+                        "status": "error",
+                        "skipped": True,
+                        "reason": "This exact call already failed repeatedly in this run. Change strategy or ask the user for help.",
+                    }
+                )
+                self._record_blocked_tool_call(
+                    tc,
+                    failed_result,
+                    context,
+                    messages,
+                    trace,
+                    react_trace,
+                    iteration,
+                )
                 continue
-
             if self._grounding is not None:
                 authorization = self._grounding.authorize_tool_call(
                     tc.name,
@@ -1993,6 +2581,84 @@ class AgentLoop:
                     )
                     continue
 
+            # A successful readonly call whose visible result was removed by
+            # micro/auto-compaction can be replayed from this run's memory. This
+            # extends the existing deterministic-cache pattern without declaring
+            # mutable web resources deterministic. Fresh/no-cache calls bypass
+            # this path, while repeatable calls must explicitly opt in.
+            if (
+                dedup_key is not None
+                and dedup_key in self._readonly_replay_ready
+                and self._readonly_replay_recoveries < MAX_READONLY_REPLAY_RECOVERIES
+                and self._readonly_replay_allowed(tool_def, tc.arguments)
+                and dedup_key in self._readonly_replay_cache
+            ):
+                cached = self._readonly_replay_cache[dedup_key]
+                restored = _replay_context_result(cached)
+                messages.append(
+                    context.format_tool_result(
+                        tc.id, tc.name, truncate_tool_result(restored)
+                    )
+                )
+                self._successful_call_keys[tc.id] = dedup_key
+                self._called_ok.add(dedup_key)
+                self._readonly_replay_ready.discard(dedup_key)
+                self._readonly_replay_recoveries += 1
+                # A repeatable tool would otherwise re-fetch on the very next
+                # identical call; the restored payload is visible now, so that
+                # call is refused until compaction removes it again.
+                if getattr(tool_def, "repeatable", False):
+                    self._readonly_replay_protected.add(dedup_key)
+                # Restoring data that compaction removed is forward progress for
+                # the working context, but not a new external observation.
+                self._tool_progress.mark_context_restored()
+                trace.write({
+                    "type": "tool_result_replayed",
+                    "iter": iteration,
+                    "tool": tc.name,
+                    "call_id": tc.id,
+                    "recovery_count": self._readonly_replay_recoveries,
+                    "recovery_limit": MAX_READONLY_REPLAY_RECOVERIES,
+                })
+                react_trace.append({"type": "tool_result_replayed", "tool": tc.name})
+                self._emit(
+                    "tool_result",
+                    {
+                        "tool": tc.name,
+                        "status": "ok",
+                        "elapsed_ms": 0,
+                        "preview": redact_tool_result(cached)[:200],
+                        "call_id": tc.id,
+                        "cached": True,
+                        "replayed": True,
+                    },
+                )
+                continue
+
+            if (
+                dedup_key is not None
+                and dedup_key in self._called_ok
+                and (
+                    not is_repeatable
+                    or dedup_key in self._readonly_replay_protected
+                )
+            ):
+                logger.warning(f"Blocked duplicate call: {tc.name} (already succeeded)")
+                replay_restored = dedup_key in self._readonly_replay_protected
+                reason = (
+                    f"{tc.name} was just restored from the run-scoped replay cache after "
+                    "compaction. The payload is already visible in context; use that "
+                    "result and continue the analysis instead of requesting the same "
+                    "call again."
+                    if replay_restored
+                    else f"{tc.name} already completed successfully. Use the previous result."
+                )
+                skip_msg = json.dumps({"skipped": True, "reason": reason})
+                messages.append(context.format_tool_result(tc.id, tc.name, skip_msg))
+                trace.write({"type": "tool_skipped", "iter": iteration, "tool": tc.name})
+                react_trace.append({"type": "tool_skipped", "tool": tc.name})
+                continue
+
             # Deterministic tools (e.g. financial_rigor calc) return the same
             # result for the same args. Checked AFTER authorization above so a
             # cached repeat can never bypass the identity gate. After auto-compact cleared earlier
@@ -2004,6 +2670,8 @@ class AgentLoop:
                 if cache_key is not None and cache_key in self._called_identical:
                     cached = self._called_identical[cache_key]
                     messages.append(context.format_tool_result(tc.id, tc.name, cached))
+                    self._successful_call_keys[tc.id] = cache_key
+                    self._called_ok.add(cache_key)
                     trace.write({
                         "type": "tool_result_cached",
                         "iter": iteration,
@@ -2085,7 +2753,7 @@ class AgentLoop:
         react_trace: list,
         iteration: int,
     ) -> None:
-        """Record an identity-gated call without invoking its implementation.
+        """Record a blocked call without invoking its implementation.
 
         Args:
             tc: Provider tool-call object.
@@ -2453,6 +3121,27 @@ class AgentLoop:
             return False
         return bool(tool_def and getattr(tool_def, "is_readonly", False))
 
+    def _readonly_replay_allowed(self, tool_def: Any, arguments: Mapping[str, Any]) -> bool:
+        """Whether an exact readonly result may be restored after compaction.
+
+        This is intentionally narrower than ``is_readonly``: deterministic
+        calls already use the existing cache, and ``no_cache=True`` explicitly
+        requests a fresh read. Repeatable calls require explicit opt-in because
+        they may otherwise be intentionally refreshed.
+        """
+        if tool_def is None or not getattr(tool_def, "is_readonly", False):
+            return False
+        if getattr(tool_def, "deterministic", False):
+            return False
+        try:
+            if bool((arguments or {}).get("no_cache")):
+                return False
+        except AttributeError:
+            return False
+        if getattr(tool_def, "repeatable", False):
+            return bool(getattr(tool_def, "replay_after_compaction", False))
+        return True
+
     def _record_written_target(self, arguments: Mapping[str, Any]) -> None:
         """Remember a file written by write_file/edit_file for completion checks."""
         raw = arguments.get("path") or arguments.get("file_path")
@@ -2525,6 +3214,62 @@ class AgentLoop:
             "file write is a failure."
         )
 
+    def _microcompact_and_unblock(self, messages: list, trace: TraceWriter, iteration: int) -> list[str]:
+        """Run layer-1 microcompact and re-open lost readonly call identities.
+
+        A readable result for another argument variant, or a synthetic skip,
+        cannot satisfy "use the previous result". Keep an exact call gated if
+        any successful copy survives; never re-open mutating tools just because
+        their results were compacted away.
+
+        Args:
+            messages: Message list, mutated in place by the compaction.
+            trace: Run trace; a ``microcompact_cleared`` event is written
+                whenever the ledger is re-opened, because this layer used to
+                act silently and left no evidence for diagnosis.
+            iteration: Current ReAct iteration, recorded on the trace event.
+
+        Returns:
+            The tool names re-opened, for callers and tests to assert on.
+        """
+        readable_before = self._readable_success_keys(messages)
+        _microcompact(messages)
+        unreadable_tools = self._unblock_lost_readonly_results(messages, readable_before)
+        if unreadable_tools:
+            trace.write({
+                "type": "microcompact_cleared",
+                "iter": iteration,
+                "tools": unreadable_tools,
+            })
+        return unreadable_tools
+
+    def _readable_success_keys(self, messages: list) -> set[tuple[str, str]]:
+        """Identify surviving successful results, not synthetic skip/stub calls."""
+        return {
+            self._successful_call_keys[msg["tool_call_id"]]
+            for msg in messages
+            if msg.get("role") == "tool"
+            and msg.get("tool_call_id") in self._successful_call_keys
+            and not _result_data_gone(msg.get("content"))
+        }
+
+    def _unblock_lost_readonly_results(
+        self, messages: list, readable_before: set[tuple[str, str]]
+    ) -> list[str]:
+        """Recover only lost exact queries; context loss cannot replay writes."""
+        lost = readable_before - self._readable_success_keys(messages)
+        reopened = {
+            key for key in lost & self._called_ok if self._is_tool_readonly(key[0])
+        }
+        self._called_ok.difference_update(reopened)
+        # Every lost call reopens, as before replay existed; the replay budget
+        # only decides, at call time, whether it is restored or run again.
+        self._readonly_replay_protected.difference_update(reopened)
+        self._readonly_replay_ready.update(
+            key for key in reopened if key in self._readonly_replay_cache
+        )
+        return sorted({key[0] for key in reopened})
+
     def _identical_call_key(self, tool_name: str, arguments: Mapping[str, Any]) -> tuple[str, str] | None:
         """Build a stable key identifying a deterministic tool invocation.
 
@@ -2576,8 +3321,19 @@ class AgentLoop:
         self._last_activity_wall = _time.time()
 
         success = _is_tool_success(result)
+        if update_memory:
+            self._tool_progress.record(
+                tc.name,
+                self._identical_call_key(tc.name, tc.arguments),
+                result,
+                success=success,
+                is_readonly=self._is_tool_readonly(tc.name),
+            )
         if success:
-            self._called_ok.add(tc.name)
+            recorded_key = self._identical_call_key(tc.name, tc.arguments)
+            if recorded_key is not None:
+                self._called_ok.add(recorded_key)
+                self._successful_call_keys[tc.id] = recorded_key
             if tc.name == "backtest":
                 try:
                     _archive_backtest_result(result, self.memory.run_dir)
@@ -2606,16 +3362,32 @@ class AgentLoop:
 
         # Cache successful deterministic results so an identical later call is
         # served without re-execution (regression: repeated financial_rigor
-        # calcs after compaction, 2026-08-20 INTC run).
+        # calcs after compaction, 2026-08-20 INTC run). Readonly results use a
+        # separate run-scoped replay cache: it is only consulted after
+        # compaction has made that exact result unreadable, and only for tools
+        # whose replay policy allows it.
         if success:
             try:
                 tool_def = self.registry.get(tc.name)
             except Exception:  # noqa: BLE001
                 tool_def = None
+            cache_key = self._identical_call_key(tc.name, tc.arguments)
             if tool_def is not None and getattr(tool_def, "deterministic", False):
-                cache_key = self._identical_call_key(tc.name, tc.arguments)
                 if cache_key is not None:
                     self._called_identical[cache_key] = result
+            elif (
+                cache_key is not None
+                and self._readonly_replay_allowed(tool_def, tc.arguments)
+            ):
+                self._readonly_replay_cache[cache_key] = result
+            # Its payload is visible again, so nothing is waiting to be restored.
+            self._readonly_replay_ready.discard(cache_key)
+            # A write can change what a readonly call reads (a factor file, a
+            # config), so no result cached before it may be replayed after it.
+            if update_memory and not self._is_tool_readonly(tc.name):
+                self._readonly_replay_cache.clear()
+                self._readonly_replay_ready.clear()
+                self._readonly_replay_protected.clear()
 
         status = "ok" if success else "error"
         truncated = truncate_tool_result(result)
@@ -2678,24 +3450,13 @@ class AgentLoop:
             for msg in messages:
                 f.write(json.dumps(msg, default=str, ensure_ascii=False) + "\n")
 
+        readable_before = self._readable_success_keys(messages)
         system_msg = messages[0]
         body = messages[1:]
 
-        # Token-budget tail: walk backward to find how many recent messages to preserve
-        accumulated = 0
-        cut_idx = len(body)
-        for i in range(len(body) - 1, -1, -1):
-            content = body[i].get("content", "")
-            msg_tokens = (len(str(content)) // 4) + 10
-            if accumulated + msg_tokens > TAIL_TOKEN_BUDGET:
-                cut_idx = i + 1
-                break
-            accumulated += msg_tokens
-            cut_idx = i
-
-        # Don't split in the middle of a tool_call/tool_result pair
-        while 0 < cut_idx < len(body) and body[cut_idx].get("role") == "tool":
-            cut_idx += 1
+        # Token-budget tail: size messages with their tool-call arguments so
+        # oversized tool calls are folded instead of hiding in the tail.
+        cut_idx = _tail_cut_index(body)
 
         head = body[:cut_idx]
         tail = body[cut_idx:]
@@ -2755,8 +3516,12 @@ class AgentLoop:
                     _compact_error.append(exc)
 
             if _compact_timeout > 0:
+                # A new thread starts with an empty context, so the session
+                # bound by run() (x-opencode-session, #1416) would not reach
+                # this call: run it inside a copy of the caller's context.
                 worker = threading.Thread(
-                    target=_run_compact_summary,
+                    target=contextvars.copy_context().run,
+                    args=(_run_compact_summary,),
                     name="compact-summary",
                     daemon=True,
                 )
@@ -2831,6 +3596,7 @@ class AgentLoop:
 
         # Fix orphaned tool pairs in the reconstructed message list
         _fix_tool_pairs(messages)
+        self._unblock_lost_readonly_results(messages, readable_before)
 
     def _emit(self, event_type: str, data: Dict[str, Any]) -> None:
         """Fire an event via the callback."""
@@ -2852,6 +3618,7 @@ _LEGACY_LAZY = {
     "HEARTBEAT_INTERVAL_S": _heartbeat_interval_s,
     "REASONING_DELTA_MIN_INTERVAL_S": _reasoning_delta_min_interval_s,
     "STREAM_RETRY_DELAY_S": _stream_retry_delay_s,
+    "STREAM_RETRY_MAX_DELAY_S": _stream_retry_max_delay_s,
     "TOOL_TIMEOUT_SECONDS": _tool_timeout_seconds,
     "GOAL_MAX_CONTINUATIONS": _goal_max_continuations,
     "STALL_TIMEOUT_SECONDS": _stall_timeout_seconds,

@@ -245,3 +245,21 @@ def test_delayed_execution_rejects_a_non_series():
     """A DataFrame or list would shift with different semantics, so reject it."""
     with pytest.raises(TypeError, match="pandas Series"):
         delayed_execution([1.0, 2.0, 3.0])
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_impact_inputs_are_rejected(bad):
+    with pytest.raises(ValueError):
+        fixed_slippage(bad, 1)
+    with pytest.raises(ValueError):
+        fixed_slippage(PRICE, 1, bps=bad)
+    with pytest.raises(ValueError):
+        linear_impact(PRICE, 1, bad, ADV)
+    with pytest.raises(ValueError):
+        linear_impact(PRICE, 1, 1_000.0, bad)
+    with pytest.raises(ValueError):
+        linear_impact(PRICE, 1, 1_000.0, ADV, impact_coeff=bad)
+    with pytest.raises(ValueError):
+        sqrt_impact(PRICE, 1, 1_000.0, ADV, bad)
+    with pytest.raises(ValueError):
+        sqrt_impact(PRICE, 1, 1_000.0, ADV, VOLATILITY, eta=bad)

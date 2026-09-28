@@ -135,42 +135,87 @@ def _daily_page(dates: list[str]) -> pd.DataFrame:
     )
 
 
-def _full_page(start: str) -> pd.DataFrame:
-    """A page of exactly _PAGE_SIZE bars, i.e. one the API truncated."""
-    dates = pd.date_range(start, periods=tencent_loader._PAGE_SIZE, freq="D")
+def _history(start: str, n_days: int) -> pd.DataFrame:
+    """A synthetic daily history of `n_days` consecutive calendar days."""
+    dates = pd.date_range(start, periods=n_days, freq="D")
     return _daily_page([d.strftime("%Y-%m-%d") for d in dates])
 
 
-def test_pagination_walks_past_the_500_bar_cap(monkeypatch) -> None:
-    """A multi-year window must not stop at the API's per-response cap."""
-    loader = tencent_loader.DataLoader()
-    requested: list[str] = []
+def _last500_api(history: pd.DataFrame, requested_ends: list[str] | None = None):
+    """Fake `_request_page` honouring the REAL Tencent fqkline contract.
+
+    The API serves the LAST ≤_PAGE_SIZE bars of [start, end], not the first
+    (verified live 2026-09-11). The previous mocks in this file encoded the
+    opposite first-500 assumption, which is why tail truncation passed CI.
+    """
 
     def fake_page(code, start, end):  # noqa: ANN001
-        requested.append(start)
-        if len(requested) == 1:
-            return _full_page("2020-01-01")
-        return _daily_page(["2021-06-01", "2021-06-02"])
+        if requested_ends is not None:
+            requested_ends.append(end)
+        window = history.loc[
+            (history.index >= pd.Timestamp(start))
+            & (history.index <= pd.Timestamp(end))
+        ]
+        return window.iloc[-tencent_loader._PAGE_SIZE:]
 
-    monkeypatch.setattr(loader, "_request_page", fake_page)
+    return fake_page
+
+
+def test_multiyear_window_is_served_in_full(monkeypatch) -> None:
+    """Regression: a >500-bar window must not degrade to its most recent 500.
+
+    Under the real last-500 semantics, forward pagination (advancing the
+    start cursor) exits after one page holding only the window's tail. The
+    backward walk must serve every bar from start_date through end_date.
+    """
+    loader = tencent_loader.DataLoader()
+    history = _history("2018-01-01", 1500)
+    end_date = history.index.max().strftime("%Y-%m-%d")
+    ends: list[str] = []
+    monkeypatch.setattr(loader, "_request_page", _last500_api(history, ends))
+
+    df = loader._fetch_one("600519.SH", "2018-01-01", end_date)
+
+    assert len(df) == 1500
+    assert df.index.min() == pd.Timestamp("2018-01-01")
+    assert df.index.max() == history.index.max()
+    assert df.index.is_monotonic_increasing
+    assert len(ends) == 3
+    assert ends[0] == end_date
+    assert ends[1] < ends[0]
+    assert ends[2] < ends[1]
+
+
+def test_pagination_moves_the_end_cursor_behind_each_page(monkeypatch) -> None:
+    """Next request's end = the day before the current page's oldest bar."""
+    loader = tencent_loader.DataLoader()
+    history = _history("2020-01-01", tencent_loader._PAGE_SIZE + 2)
+    ends: list[str] = []
+    monkeypatch.setattr(loader, "_request_page", _last500_api(history, ends))
+
     df = loader._fetch_one("600519.SH", "2020-01-01", "2021-12-31")
 
-    assert len(requested) == 2
-    # The second page resumes the day after the first page's last bar.
-    assert requested[1] == "2021-05-15"
     assert len(df) == tencent_loader._PAGE_SIZE + 2
-    assert df.index.is_monotonic_increasing
+    first_page_oldest = history.index[-tencent_loader._PAGE_SIZE]
+    expected_next_end = first_page_oldest - pd.Timedelta(days=1)
+    assert ends[1] == expected_next_end.strftime("%Y-%m-%d")
 
 
 def test_overlapping_pages_are_deduplicated(monkeypatch) -> None:
     """Rows repeated across pages must collapse, not double-count."""
     loader = tencent_loader.DataLoader()
-    pages = [_full_page("2020-01-01"), _daily_page(["2021-05-14", "2021-05-15"])]
+    history = _history("2020-01-01", tencent_loader._PAGE_SIZE)
+    calls = {"n": 0}
 
-    monkeypatch.setattr(
-        loader, "_request_page", lambda code, start, end: pages.pop(0),
-    )
-    df = loader._fetch_one("600519.SH", "2020-01-01", "2021-12-31")
+    def fake_page(code, start, end):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return history.iloc[-tencent_loader._PAGE_SIZE:]
+        older = _daily_page(["2019-12-31"])
+        return pd.concat([older, history.iloc[:2]])
+
+    monkeypatch.setattr(loader, "_request_page", fake_page)
+    df = loader._fetch_one("600519.SH", "2019-12-01", "2021-12-31")
 
     assert df.index.duplicated().sum() == 0
     assert len(df) == tencent_loader._PAGE_SIZE + 1
@@ -179,16 +224,11 @@ def test_overlapping_pages_are_deduplicated(monkeypatch) -> None:
 def test_exhausting_the_page_cap_raises_instead_of_truncating(monkeypatch) -> None:
     """Hitting _MAX_PAGES must fail loudly, like the other bounded loaders."""
     loader = tencent_loader.DataLoader()
-    starts = ["2000-01-01"]
+    endless = _history("1990-01-01", 20000)
+    monkeypatch.setattr(loader, "_request_page", _last500_api(endless))
 
-    def fake_page(code, start, end):  # noqa: ANN001
-        page = _full_page(start)
-        starts.append(start)
-        return page
-
-    monkeypatch.setattr(loader, "_request_page", fake_page)
     with pytest.raises(ValueError, match="incomplete tencent history"):
-        loader._fetch_one("600519.SH", "2000-01-01", "2026-12-31")
+        loader._fetch_one("600519.SH", "1990-01-01", "2026-12-31")
 
 
 def test_a_failed_page_raises_instead_of_returning_partial_history(
@@ -196,13 +236,14 @@ def test_a_failed_page_raises_instead_of_returning_partial_history(
 ) -> None:
     """A network failure mid-walk must not read downstream as a short series."""
     loader = tencent_loader.DataLoader()
+    history = _history("2020-01-01", tencent_loader._PAGE_SIZE + 10)
     calls = {"n": 0}
     sleeps: list[float] = []
 
     def fake_page(code, start, end):  # noqa: ANN001
         calls["n"] += 1
         if calls["n"] == 1:
-            return _full_page("2020-01-01")
+            return history.iloc[-tencent_loader._PAGE_SIZE:]
         raise OSError("connection reset")
 
     monkeypatch.setattr(loader, "_request_page", fake_page)
@@ -218,36 +259,84 @@ def test_a_failed_page_raises_instead_of_returning_partial_history(
 def test_a_short_page_ends_the_walk(monkeypatch) -> None:
     """A page below the cap means the window is served; stop requesting."""
     loader = tencent_loader.DataLoader()
-    calls: list[str] = []
+    history = _history("2026-01-05", 2)
+    ends: list[str] = []
+    monkeypatch.setattr(loader, "_request_page", _last500_api(history, ends))
 
-    def fake_page(code, start, end):  # noqa: ANN001
-        calls.append(start)
-        return _daily_page(["2026-01-05", "2026-01-06"])
-
-    monkeypatch.setattr(loader, "_request_page", fake_page)
     df = loader._fetch_one("600519.SH", "2026-01-01", "2026-01-31")
 
-    assert calls == ["2026-01-01"]
+    assert ends == ["2026-01-31"]
     assert len(df) == 2
 
 
 def test_a_bar_on_the_end_date_itself_is_not_dropped(monkeypatch) -> None:
-    """When the next start lands exactly on end_date, that day still counts."""
+    """A bar dated exactly end_date must be part of the served series."""
     loader = tencent_loader.DataLoader()
-    first = _full_page("2020-01-01")
-    boundary = first.index.max() + pd.Timedelta(days=1)
-    end_date = boundary.strftime("%Y-%m-%d")
-    requested: list[str] = []
+    history = _history("2020-01-01", tencent_loader._PAGE_SIZE + 1)
+    end_date = history.index.max().strftime("%Y-%m-%d")
+    monkeypatch.setattr(loader, "_request_page", _last500_api(history))
 
-    def fake_page(code, start, end):  # noqa: ANN001
-        requested.append(start)
-        if len(requested) == 1:
-            return first
-        return _daily_page([end_date])
-
-    monkeypatch.setattr(loader, "_request_page", fake_page)
     df = loader._fetch_one("600519.SH", "2020-01-01", end_date)
 
-    assert requested == ["2020-01-01", end_date]
+    assert df.index.max() == history.index.max()
     assert len(df) == tencent_loader._PAGE_SIZE + 1
-    assert df.index.max() == boundary
+
+
+def test_error_shaped_reply_raises_instead_of_returning_none(monkeypatch) -> None:
+    """A non-zero-code reply with no payload is a failure, not an empty window."""
+    loader = tencent_loader.DataLoader()
+    payload = json.dumps({"code": 1, "msg": "rate limit"})
+
+    def fake_urlopen(req, timeout=None, **kwargs):  # noqa: ANN001, ANN002
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(ValueError, match="error reply"):
+        loader._request_page("600519.SH", "2024-01-01", "2024-06-30")
+
+
+def test_midwalk_empty_page_is_rerequested_before_truncating(monkeypatch) -> None:
+    """A glitched empty mid-walk must not end the walk: one re-request decides."""
+    loader = tencent_loader.DataLoader()
+    history = _history("2020-01-01", tencent_loader._PAGE_SIZE + 10)
+    calls = {"n": 0}
+    sleeps: list[float] = []
+    monkeypatch.setattr(tencent_loader.time, "sleep", sleeps.append)
+
+    def fake_page(code, start, end):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return history.iloc[-tencent_loader._PAGE_SIZE:]
+        if calls["n"] == 2:
+            return None
+        return history.iloc[: -tencent_loader._PAGE_SIZE]
+
+    monkeypatch.setattr(loader, "_request_page", fake_page)
+    df = loader._fetch_one("600519.SH", "2020-01-01", "2026-12-31")
+
+    assert calls["n"] == 3
+    assert len(df) == tencent_loader._PAGE_SIZE + 10
+    assert df.index.is_monotonic_increasing
+    assert sleeps == [tencent_loader._PAGE_BACKOFF]
+
+
+def test_midwalk_empty_page_that_persists_ends_the_walk(monkeypatch) -> None:
+    """A genuine data start (e.g. a pre-IPO window) stays empty on re-request."""
+    loader = tencent_loader.DataLoader()
+    history = _history("2020-01-01", tencent_loader._PAGE_SIZE)
+    calls = {"n": 0}
+    sleeps: list[float] = []
+    monkeypatch.setattr(tencent_loader.time, "sleep", sleeps.append)
+
+    def fake_page(code, start, end):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return history.iloc[-tencent_loader._PAGE_SIZE:]
+        return None
+
+    monkeypatch.setattr(loader, "_request_page", fake_page)
+    df = loader._fetch_one("600519.SH", "2019-01-01", "2026-12-31")
+
+    assert calls["n"] == 3
+    assert len(df) == tencent_loader._PAGE_SIZE

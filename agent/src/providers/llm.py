@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from copy import copy
 from urllib.parse import urlparse
 import re
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 from pydantic import PrivateAttr
 
 from src.config.accessor import get_env_config, reset_env_config
+from src.providers.session_context import current_llm_session_id
 from src.providers.capabilities import (
     ProviderCapabilities,
     get_llm_credentials,
@@ -68,6 +70,27 @@ def _build_proxy_free_http_clients() -> tuple[Any, Any]:
         httpx.Client(transport=sync_transport),
         httpx.AsyncClient(transport=async_transport),
     )
+
+
+_OPENCODE_PROVIDER_NAMES = frozenset({"opencode", "opencode-go", "opencode-zen"})
+_OPENCODE_SESSION_HEADER = "x-opencode-session"
+
+
+def _targets_opencode(provider: str | None, base_url: str | None) -> bool:
+    """Report whether requests go to the OpenCode relay.
+
+    True for the ``opencode*`` provider names and for any provider whose base
+    URL points at ``opencode.ai`` (e.g. ``deepseek`` re-pointed at the Go
+    endpoint), so the session header follows the endpoint, not the label.
+    """
+    normalized = (provider or "").strip().lower().replace("_", "-")
+    if normalized in _OPENCODE_PROVIDER_NAMES:
+        return True
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    host = (urlparse(raw if "//" in raw else f"https://{raw}").hostname or "").lower()
+    return host == "opencode.ai" or host.endswith(".opencode.ai")
 
 
 _AMBIENT_OPENAI_HEADER_ENV_VARS = (
@@ -264,8 +287,10 @@ if ChatOpenAI is not None:
         _vibe_provider: Optional[str] = PrivateAttr(default=None)
         _vibe_api_key: str = PrivateAttr(default="")
         _vibe_ambient_header_names: tuple[str, ...] = PrivateAttr(default=())
+        _vibe_explicit_twin_headers: dict[str, Any] = PrivateAttr(default_factory=dict)
         _vibe_has_explicit_authorization: bool = PrivateAttr(default=False)
         _vibe_owned_http_clients: tuple[Any, ...] = PrivateAttr(default=())
+        _vibe_fallback_session_id: str = PrivateAttr(default="")
 
         def __init__(
             self,
@@ -290,12 +315,46 @@ if ChatOpenAI is not None:
             self._vibe_provider = vibe_provider
             self._vibe_api_key = vibe_api_key or ""
             self._vibe_owned_http_clients = tuple(vibe_owned_http_clients or ())
+            # One id per adapter: outside a bound Vibe session (swarm workers,
+            # scheduled research, CLI) every request from this adapter still
+            # shares a stable conversation identity.
+            self._vibe_fallback_session_id = uuid.uuid4().hex
+            # Every ambient spelling is omitted per request, and an explicit
+            # header sharing its name in another case is put back after the
+            # omits (see _provider_scoped_extra_headers). Excluding the twin
+            # from the omits instead is right only under openai >= 3.19.2's
+            # case-insensitive merge; openai 2.53 (the lock) and 3.19.0 merge
+            # with a plain dict and would send the ambient ``user-agent``
+            # beside ``User-Agent`` (#1573).
             self._vibe_ambient_header_names = tuple(
                 name for name in ambient_names if name not in explicit_names
             )
+            ambient_names_lower = {name.lower() for name in self._vibe_ambient_header_names}
+            self._vibe_explicit_twin_headers = {
+                str(name): value
+                for name, value in (
+                    explicit_headers.items() if isinstance(explicit_headers, Mapping) else ()
+                )
+                if str(name).lower() in ambient_names_lower
+            }
             self._vibe_has_explicit_authorization = (
                 "authorization" in explicit_names_lower
             )
+
+        def _opencode_session_headers(self) -> dict[str, str]:
+            """Return the ``x-opencode-session`` header for opencode.ai relays.
+
+            OpenCode Go rejects requests without a stable per-conversation id
+            (400 ``MissingSessionID``) and uses it for routing and prompt
+            caching. The agent loop binds the active Vibe session id via
+            ``src.providers.session_context``; the per-adapter fallback keeps
+            one conversation stable when no session is bound.
+            """
+            base_url = getattr(self, "openai_api_base", None)
+            if not _targets_opencode(self._vibe_provider, base_url):
+                return {}
+            session_id = current_llm_session_id() or self._vibe_fallback_session_id
+            return {_OPENCODE_SESSION_HEADER: session_id} if session_id else {}
 
         def _provider_scoped_extra_headers(self) -> dict[str, Any]:
             """Remove ambient OpenAI-only headers from named relay requests."""
@@ -313,6 +372,10 @@ if ChatOpenAI is not None:
                 ambient_authorization = (
                     ambient_authorization or name.lower() == "authorization"
                 )
+            # openai >= 3.19.2 applies an omit case-insensitively, so the omit for an
+            # ambient ``user-agent`` also took the provider's ``User-Agent``.
+            # Inserted after the omits, the explicit value is the one that stays.
+            overrides.update(self._vibe_explicit_twin_headers)
 
             # OPENAI_CUSTOM_HEADERS can override the SDK's normal Bearer header.
             # Remove every captured spelling, then restore the selected provider
@@ -524,13 +587,107 @@ if ChatOpenAI is not None:
                 self._capture(choice["message"], gen.message)
             return result
 
+        def _generate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return super()._generate(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - retried or re-raised below
+                if not self._recoverable_rejection(exc):
+                    raise
+                return super()._generate(*args, **kwargs)
+
+        async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return await super()._agenerate(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - retried or re-raised below
+                if not self._recoverable_rejection(exc):
+                    raise
+                return await super()._agenerate(*args, **kwargs)
+
+        def _remember_temperature_unsupported(self, exc: BaseException) -> bool:
+            """Record a temperature-unsupported error and report a one-shot retry.
+
+            Mirrors the native Anthropic path for the generic OpenAI-compatible
+            branch: next-generation Claude models served through
+            ``OPENAI_BASE_URL`` return HTTP 400 when `temperature` is sent
+            (issue #1223). The model is remembered in
+            ``_ANTHROPIC_TEMPERATURE_UNSUPPORTED`` so later requests omit it up
+            front.
+            """
+            if not _is_anthropic_temperature_unsupported_error(exc):
+                return False
+            model = str(self.model_name)
+            if model not in _ANTHROPIC_TEMPERATURE_UNSUPPORTED:
+                logger.info(
+                    "Model %s rejects `temperature`; retrying without it "
+                    "and omitting it for subsequent calls.",
+                    model,
+                )
+                _ANTHROPIC_TEMPERATURE_UNSUPPORTED.add(model)
+            return True
+
+        def _use_responses_api(self, payload: dict) -> bool:  # type: ignore[override]
+            """Route a model whose chat endpoint refused tools to /v1/responses."""
+            if str(self.model_name) in _RESPONSES_REQUIRED:
+                return True
+            return super()._use_responses_api(payload)
+
+        def _remember_responses_required(self, exc: BaseException) -> bool:
+            """Record a chat-completions refusal naming /v1/responses; report a one-shot retry.
+
+            OpenAI's gpt-5.6-* reject function tools on ``/v1/chat/completions``
+            unless ``reasoning_effort`` is 'none', which would run the model
+            without its reasoning; the same request on ``/v1/responses`` is
+            accepted with the effort under ``reasoning.effort`` (issue #1473).
+            The model is remembered in ``_RESPONSES_REQUIRED`` so later requests
+            take that route up front. A model that already failed there is not
+            retried again.
+            """
+            if not _is_responses_required_error(exc):
+                return False
+            model = str(self.model_name)
+            if model in _RESPONSES_REQUIRED or self.use_responses_api is True:
+                return False
+            logger.warning(
+                "Model %s refuses function tools on /v1/chat/completions with a "
+                "reasoning effort; retrying on /v1/responses and using it for "
+                "subsequent calls. Set LANGCHAIN_USE_RESPONSES_API=true to select "
+                "it up front.",
+                model,
+            )
+            _RESPONSES_REQUIRED.add(model)
+            return True
+
+        def _recoverable_rejection(self, exc: BaseException) -> bool:
+            """Report whether a failed request should be sent once more.
+
+            Each branch records what the endpoint rejected so the retry, and
+            every later request, is shaped differently: without ``temperature``
+            (#1223) or on ``/v1/responses`` (#1473).
+            """
+            return self._remember_temperature_unsupported(exc) or self._remember_responses_required(exc)
+
         def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
             """Route Responses streams through the mapping-compatible adapter."""
             if self._use_responses_api({**kwargs, **self.model_kwargs}):
                 cloned = copy(self)
                 cloned.root_client = _ResponsesSyncClient(self.root_client)
-                return super(ChatOpenAIWithReasoning, cloned)._stream(*args, **kwargs)
-            return self._stream_with_usage_fallback(*args, **kwargs)
+                inner = super(ChatOpenAIWithReasoning, cloned)._stream(*args, **kwargs)
+            else:
+                inner = self._stream_with_usage_fallback(*args, **kwargs)
+            # The 400 arrives before the first chunk, so restarting the stream
+            # cannot duplicate output — but that is a property of the provider,
+            # not of this code. Enforce it here instead of assuming it: once a
+            # chunk has been emitted the error is re-raised, because replaying
+            # the stream would emit those chunks a second time.
+            emitted = False
+            try:
+                for chunk in inner:
+                    emitted = True
+                    yield chunk
+            except Exception as exc:  # noqa: BLE001 - retried or re-raised below
+                if emitted or not self._recoverable_rejection(exc):
+                    raise
+                yield from self._stream(*args, **kwargs)
 
         def _stream_with_usage_fallback(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
             # stream_usage=True is set at build time so streamed calls report
@@ -553,19 +710,17 @@ if ChatOpenAI is not None:
             _STREAM_USAGE_UNSUPPORTED.add(model)
             yield from super()._stream(*args, stream_usage=False, **kwargs)
 
-        async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-            """Async route matching ``_stream`` for Responses compatibility."""
-            if self._use_responses_api({**kwargs, **self.model_kwargs}):
-                cloned = copy(self)
-                cloned.root_async_client = _ResponsesAsyncClient(self.root_async_client)
-                async for chunk in super(ChatOpenAIWithReasoning, cloned)._astream(
-                    *args, **kwargs
-                ):
-                    yield chunk
-                return
+        async def _astream_with_usage_fallback(
+            self, *args: Any, **kwargs: Any
+        ) -> AsyncIterator[Any]:
+            # stream_usage=True is set at build time so streamed calls report
+            # real token counts (issue #1224); an endpoint that rejects
+            # stream_options is remembered and retried without it.
             model = str(self.model_name)
             if model in _STREAM_USAGE_UNSUPPORTED:
-                async for chunk in super()._astream(*args, stream_usage=False, **kwargs):
+                async for chunk in super()._astream(
+                    *args, stream_usage=False, **kwargs
+                ):
                     yield chunk
                 return
             try:
@@ -582,6 +737,30 @@ if ChatOpenAI is not None:
             _STREAM_USAGE_UNSUPPORTED.add(model)
             async for chunk in super()._astream(*args, stream_usage=False, **kwargs):
                 yield chunk
+
+        async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            """Async route matching ``_stream`` for Responses compatibility."""
+            if self._use_responses_api({**kwargs, **self.model_kwargs}):
+                cloned = copy(self)
+                cloned.root_async_client = _ResponsesAsyncClient(self.root_async_client)
+                inner = super(ChatOpenAIWithReasoning, cloned)._astream(*args, **kwargs)
+            else:
+                inner = self._astream_with_usage_fallback(*args, **kwargs)
+            # The 400 arrives before the first chunk, so restarting the stream
+            # cannot duplicate output — but that is a property of the provider,
+            # not of this code. Enforce it here instead of assuming it: once a
+            # chunk has been emitted the error is re-raised, because replaying
+            # the stream would emit those chunks a second time.
+            emitted = False
+            try:
+                async for chunk in inner:
+                    emitted = True
+                    yield chunk
+            except Exception as exc:  # noqa: BLE001 - retried or re-raised below
+                if emitted or not self._recoverable_rejection(exc):
+                    raise
+                async for chunk in self._astream(*args, **kwargs):
+                    yield chunk
 
         def _convert_chunk_to_generation_chunk(  # type: ignore[override]
             self,
@@ -614,6 +793,9 @@ if ChatOpenAI is not None:
             is absent, breaking ReAct continuations after a tool call (#39).
             """
             payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+            # Models that rejected `temperature` before omit it up front (#1223).
+            if str(self.model_name) in _ANTHROPIC_TEMPERATURE_UNSUPPORTED:
+                payload.pop("temperature", None)
             if "messages" in payload:
                 messages = super()._convert_input(input_).to_messages()
                 caps = self._capabilities()
@@ -642,6 +824,17 @@ if ChatOpenAI is not None:
                 if isinstance(existing_headers, Mapping):
                     scoped_headers.update(existing_headers)
                 payload["extra_headers"] = scoped_headers
+            session_headers = self._opencode_session_headers()
+            if session_headers:
+                existing_headers = payload.get("extra_headers")
+                merged: dict[str, Any] = (
+                    dict(existing_headers) if isinstance(existing_headers, Mapping) else {}
+                )
+                present = {str(name).lower() for name in merged}
+                for name, value in session_headers.items():
+                    if name.lower() not in present:
+                        merged[name] = value
+                payload["extra_headers"] = merged
             return payload
 
 else:
@@ -881,6 +1074,34 @@ def _is_stream_usage_unsupported_error(exc: BaseException) -> bool:
         or "not allowed" in message
     )
 
+# Models whose Chat Completions endpoint refused function tools and named
+# /v1/responses as the way out (issue #1473). OpenAI's gpt-5.6-* answer HTTP 400
+# "Function tools with reasoning_effort are not supported for <model> in
+# /v1/chat/completions. To use function tools, use /v1/responses or set
+# reasoning_effort to 'none'" whenever the request carries tools and the effort
+# is anything but 'none' -- the model's own default when none is configured
+# included. Setting 'none' would run the model without its reasoning, so the
+# request is retried on /v1/responses instead, where the effort travels as
+# ``reasoning.effort``. Membership is populated on that first refusal and reused
+# process-wide so later calls skip the failed request.
+_RESPONSES_REQUIRED: set[str] = set()
+
+
+def _is_responses_required_error(exc: BaseException) -> bool:
+    """Return True when an endpoint refused tools and pointed at /v1/responses.
+
+    Matches the endpoint's own instruction, not a model name: the message has
+    to name ``reasoning_effort``, say it is not supported, and offer
+    ``/v1/responses``. A gateway that merely rejects ``reasoning_effort`` as an
+    unknown field does not match, because nothing says its Responses route
+    would fare better.
+    """
+    message = str(getattr(exc, "message", "") or exc).lower()
+    if "reasoning_effort" not in message or "/v1/responses" not in message:
+        return False
+    return "not supported" in message or "unsupported" in message
+
+
 # Cache of base ChatAnthropic class -> temperature-safe subclass, so the dynamic
 # subclass is built once per resolved base class (keyed to support test doubles).
 _TEMPERATURE_SAFE_ANTHROPIC_CACHE: dict[type, type] = {}
@@ -925,6 +1146,17 @@ def _make_temperature_safe_anthropic(base_cls: type) -> type:
         payload = base_cls._get_request_payload(self, *args, **kwargs)
         if isinstance(payload, dict) and self.model in _ANTHROPIC_TEMPERATURE_UNSUPPORTED:
             payload.pop("temperature", None)
+            # langchain-anthropic relocates sampling params the installed
+            # anthropic SDK (>=1) no longer accepts as named arguments into
+            # `extra_body`, which the SDK merges into the request JSON as-is.
+            # The API rejects `temperature` from either location.
+            extra_body = payload.get("extra_body")
+            if isinstance(extra_body, dict) and "temperature" in extra_body:
+                extra_body = {k: v for k, v in extra_body.items() if k != "temperature"}
+                if extra_body:
+                    payload["extra_body"] = extra_body
+                else:
+                    payload.pop("extra_body", None)
         return payload
 
     def _remember_and_should_retry(self: Any, exc: BaseException) -> bool:
@@ -1112,7 +1344,12 @@ def _build_anthropic(
 
 
 def _load_env_file(path: Path) -> None:
-    """Load a single .env file into os.environ (setdefault, no override)."""
+    """Load a single .env file into os.environ without clobbering real vars.
+
+    Exported environment variables are explicit operator intent and outrank
+    the file; ``.env`` only fills the gaps (pinned by
+    ``test_dispatch_connector_never_overrides_a_real_environment_variable``).
+    """
     if load_dotenv is not None:
         load_dotenv(dotenv_path=path, override=False)
     else:
@@ -1122,8 +1359,8 @@ def _load_env_file(path: Path) -> None:
                 continue
             key, value = line.split("=", 1)
             key = key.strip()
-            if key:
-                os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+            if key and key not in os.environ:
+                os.environ[key] = value.strip().strip('"').strip("'")
 
 
 def _ensure_dotenv() -> None:
@@ -1203,8 +1440,8 @@ def _supports_top_level_reasoning_effort(caps: ProviderCapabilities) -> bool:
     strictly rejects the unknown key outright — so the default is off and the
     consequence of that default is a no-op, not a failed call.
 
-    Relays that take the effort inside ``extra_body.reasoning`` (OpenRouter,
-    Requesty) use that path instead and are excluded here.
+    Relays that take the effort inside ``extra_body.reasoning`` (OpenRouter)
+    use that path instead and are excluded here.
 
     Args:
         caps: Canonical capabilities resolved for the provider and model. Note

@@ -27,9 +27,13 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 
-# Tencent fqkline caps a single response at `_PAGE_SIZE` bars.  Requests for a
-# multi-year window (e.g. 2018-2025 daily) silently truncate at 500 bars
-# (roughly the first 2 years) unless we paginate by advancing the start date.
+# Tencent fqkline caps a single response at `_PAGE_SIZE` bars and serves the
+# LAST bars of the requested window (ending at the `end` parameter), not the
+# first — verified empirically 2026-09-11: a 2018-01-01..2026-06-30 request
+# returned 500 bars spanning 2024-06-06..2026-06-30, while a window holding
+# fewer than 500 trading days was served in full from its start (the start
+# clamp is honoured).  Multi-year windows therefore paginate BACKWARD: see
+# `_fetch_one`.
 _PAGE_SIZE = 500
 # 12 pages * 500 bars = 6000 bars ≈ 24 trading years; a hard cap also guards
 # against pathological loop behavior if the API ever stops advancing.
@@ -139,6 +143,11 @@ class DataLoader:
 
         data = json.loads(raw)
         # Response: {"code":0,"data":{"sh601595":{"day":[["2026-06-01","21.32",...], ...]}}}
+        if data.get("code") not in (0, None) and not data.get("data"):
+            # An error-shaped reply is a failure, not an empty window: None
+            # here would let a throttled reply end the walk mid-pagination
+            # and serve (and cache) a truncated series as complete history.
+            raise ValueError(f"tencent fqkline error reply: code={data.get('code')}")
         stock_data = data.get("data", {})
         if not stock_data:
             return None
@@ -183,28 +192,37 @@ class DataLoader:
         """Paginate [start_date, end_date] in `_PAGE_SIZE`-bar windows.
 
         The Tencent API returns at most 500 bars per request regardless of the
-        requested window, so a multi-year range is silently truncated unless we
-        advance the start date by one day past the last bar of each page. A
-        window this loader cannot serve in full raises instead of returning a
+        requested window, and those are the LAST bars ending at the requested
+        end date (see the `_PAGE_SIZE` comment for the verified semantics).
+        Pagination therefore walks BACKWARD: start_date stays fixed and the end
+        cursor moves to the day before each page's oldest bar, until a short
+        page (< `_PAGE_SIZE`) or an exhausted cursor signals the window is
+        served in full. Walking forward instead — advancing the start cursor
+        past each page's newest bar — silently degrades any window longer than
+        one page to its most recent ~500 bars: the first response already ends
+        at end_date, the advanced cursor steps past the window, the next page
+        is empty, and the loop exits cleanly with a tail-only series.
+
+        A window this loader cannot serve in full raises instead of returning a
         quietly short series, matching the other bounded-window loaders.
         """
         chunks: List[pd.DataFrame] = []
-        cursor = start_date
-        seen_starts: set[str] = set()
+        cursor_end = end_date
+        seen_ends: set[str] = set()
 
         for _ in range(_MAX_PAGES):
-            if cursor in seen_starts:
+            if cursor_end in seen_ends:
                 raise ValueError(
                     f"incomplete tencent history: {code} stopped advancing at "
-                    f"{cursor} before reaching {end_date}"
+                    f"{cursor_end} before reaching {start_date}"
                 )
-            seen_starts.add(cursor)
+            seen_ends.add(cursor_end)
 
             page: Optional[pd.DataFrame] = None
             last_error: Optional[Exception] = None
             for attempt in range(_PAGE_RETRIES):
                 try:
-                    page = self._request_page(code, cursor, end_date)
+                    page = self._request_page(code, start_date, cursor_end)
                     last_error = None
                     break
                 except Exception as exc:  # noqa: BLE001 - transient network jitter
@@ -215,26 +233,42 @@ class DataLoader:
                 # Partial pages already collected would read as a complete
                 # history downstream; a failed page is an error, not a series.
                 raise ValueError(
-                    f"incomplete tencent history: {code} page at {cursor} failed "
-                    f"after {_PAGE_RETRIES} attempts: {last_error}"
+                    f"incomplete tencent history: {code} page ending at "
+                    f"{cursor_end} failed after {_PAGE_RETRIES} attempts: "
+                    f"{last_error}"
                 ) from last_error
 
             if page is None or page.empty:
-                break
+                if not chunks:
+                    break
+                # A mid-walk empty page is ambiguous: the genuine start of
+                # history, or a throttled reply. One re-request decides — a
+                # transient glitch returns data, a genuine boundary stays
+                # empty and terminates the walk.
+                time.sleep(_PAGE_BACKOFF)
+                try:
+                    page = self._request_page(code, start_date, cursor_end)
+                except Exception as exc:  # noqa: BLE001 - transient network jitter
+                    raise ValueError(
+                        f"incomplete tencent history: {code} re-request at "
+                        f"{cursor_end} failed: {exc}"
+                    ) from exc
+                if page is None or page.empty:
+                    break
             chunks.append(page)
 
-            # A short page means the window is exhausted.
+            # A short page means the walk reached start_date.
             if len(page) < _PAGE_SIZE:
                 break
-            last = page.index.max()
-            next_start = (last + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-            if next_start > end_date:
+            first = page.index.min()
+            next_end = (first - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            if next_end < start_date:
                 break
-            cursor = next_start
+            cursor_end = next_end
         else:
             raise ValueError(
                 f"incomplete tencent history: {code} hit {_MAX_PAGES} pages "
-                f"without reaching {end_date}"
+                f"without reaching {start_date}"
             )
 
         if not chunks:

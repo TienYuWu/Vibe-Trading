@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ArrowLeftRight,
   BarChart3,
+  Braces,
   CalendarRange,
   CheckCircle2,
   Code2,
@@ -123,6 +124,10 @@ export function RunDetail() {
   const { t } = useTranslation();
   const [run, setRun] = useState<RunData | null>(null);
   const [code, setCode] = useState<Record<string, string>>({});
+  // The prompt header sits above the scrollable body (flex-1 min-h-0
+  // overflow-auto), so an unclamped multi-paragraph prompt eats most of the
+  // viewport and leaves almost no room for the tabs/dashboard below it.
+  const [promptExpanded, setPromptExpanded] = useState(false);
   const [tab, setTab] = useState<Tab>(requestedInitialTab);
   const [loading, setLoading] = useState(true);
   const [selectedSymbol, setSelectedSymbol] = useState("");
@@ -164,6 +169,7 @@ export function RunDetail() {
     cancelBulkChartLoadRef.current = true;
     setRun(null);
     setCode({});
+    setPromptExpanded(false);
     setTab(requestedInitialTab);
     setLoading(true);
     setSelectedSymbol("");
@@ -364,7 +370,21 @@ export function RunDetail() {
           </div>
           {run.elapsed_seconds && <span className="text-xs text-muted-foreground">{run.elapsed_seconds.toFixed(1)}s</span>}
         </div>
-        {run.prompt && <p className="text-sm text-muted-foreground">{run.prompt}</p>}
+        {run.prompt && (
+          <div>
+            <p className={cn("text-sm text-muted-foreground whitespace-pre-wrap", !promptExpanded && "line-clamp-3")}>
+              {run.prompt}
+            </p>
+            <button
+              type="button"
+              aria-expanded={promptExpanded}
+              onClick={() => setPromptExpanded((v) => !v)}
+              className="mt-1 text-xs text-primary hover:underline"
+            >
+              {promptExpanded ? t("runDetail.showLessPrompt") : t("runDetail.showFullPrompt")}
+            </button>
+          </div>
+        )}
         {run.metrics && <MetricsCard metrics={run.metrics as Record<string, number>} />}
 
         <div className="flex flex-wrap items-center gap-1">
@@ -446,9 +466,15 @@ export function RunDetail() {
 }
 
 function RunCardTab({ card }: { card: RunCard }) {
+  const { t } = useTranslation();
   const backtest = card.backtest || {};
   const reproducibility = card.reproducibility || {};
   const metrics = card.metrics || {};
+  // Rendered as JSON: a dict or list value would otherwise collapse - an empty
+  // list formats as a blank cell, which reads as "missing" rather than "none".
+  const structuredMetrics = Object.fromEntries(
+    Object.entries(card.structured_metrics || {}).map(([key, value]) => [key, JSON.stringify(value)]),
+  );
   const artifacts = card.artifacts || [];
   const warnings = card.warnings || [];
   const dataSources = card.data_sources || [];
@@ -501,6 +527,53 @@ function RunCardTab({ card }: { card: RunCard }) {
           )}
         </RunCardPanel>
       </div>
+
+      <RunCardPanel title={i18n.t("runDetail.structuredMetrics")} icon={Braces}>
+        <KeyValueTable data={structuredMetrics} empty={i18n.t("runDetail.noStructuredMetrics")} monospaceValues />
+      </RunCardPanel>
+
+      <RunCardPanel title={t("runDetail.trust.executionRecords")} icon={List}>
+        <p className="mb-3 text-xs text-muted-foreground">{t("runDetail.trust.executionDescription")}</p>
+        {card.tool_traces?.length ? (
+          <ol className="space-y-3">
+            {card.tool_traces.map((trace, index) => (
+              <li key={`${index}-${trace.started_at}`} className="rounded-lg border border-border/60 p-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-medium">{t(`runDetail.trust.tools.${trace.tool}`)}</span>
+                  <span className={cn("rounded-md px-2 py-1 text-xs", trace.status === "ok" ? "bg-success/10 text-success" : trace.status === "error" ? "bg-danger/10 text-danger" : "bg-muted text-muted-foreground")}>
+                    {t(`runDetail.trust.status.${trace.status}`)}
+                  </span>
+                </div>
+                <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.startedAt")}</dt><dd className="mt-1 break-all"><time dateTime={trace.started_at}>{trace.started_at || t("runDetail.noneRecorded")}</time></dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.endedAt")}</dt><dd className="mt-1 break-all"><time dateTime={trace.ended_at}>{trace.ended_at || t("runDetail.noneRecorded")}</time></dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.argsHash")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{trace.args_hash || t("runDetail.noneRecorded")}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.resultHash")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{trace.result_hash || t("runDetail.noneRecorded")}</dd></div>
+                </dl>
+              </li>
+            ))}
+          </ol>
+        ) : <p className="text-sm text-muted-foreground">{t("runDetail.trust.noExecutionRecords")}</p>}
+      </RunCardPanel>
+
+      <RunCardPanel title={t("runDetail.trust.metricEvidence")} icon={FileCheck2}>
+        <p className="mb-3 text-xs text-muted-foreground">{t("runDetail.trust.evidenceDescription")}</p>
+        {card.citations?.length ? (
+          <ul className="space-y-3">
+            {card.citations.map((citation, index) => (
+              <li key={`${index}-${citation.metric}`} className="rounded-lg border border-border/60 p-3">
+                <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.metric")}</dt><dd className="mt-1 break-all font-mono">{citation.metric}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.artifact")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{citation.artifact_id}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.column")}</dt><dd className="mt-1 break-all font-mono">{citation.column}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.row")}</dt><dd className="mt-1 font-mono">{citation.row}</dd></div>
+                  <div className="sm:col-span-2"><dt className="text-muted-foreground">{t("runDetail.trust.artifactHash")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{citation.sha256 || t("runDetail.noneRecorded")}</dd></div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="text-sm text-muted-foreground">{t("runDetail.trust.noMetricEvidence")}</p>}
+      </RunCardPanel>
 
       <RunCardPanel title={i18n.t("runDetail.artifactChecksums")} icon={FileCheck2}>
         {artifacts.length > 0 ? (
@@ -585,7 +658,9 @@ function StudioTab({ xray, notes }: { xray?: RiskXRayPayload; notes?: RebalanceN
       {notes && summary && (
         <RunCardPanel title={i18n.t("runDetail.rebalanceNotes")} icon={Gauge}>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <RunCardStat label={i18n.t("runDetail.rebalanceCount")} value={String(summary.rebalance_count)} />
+            <RunCardStat label={i18n.t("runDetail.rebalanceCount")} value={String(summary.target_change_count ?? summary.rebalance_count ?? 0)} />
+            <RunCardStat label={i18n.t("runDetail.rebalanceExecuted")} value={String(summary.rebalance_executed_fills ?? "-")} />
+            <RunCardStat label={i18n.t("runDetail.rebalanceRealizedTurnover")} value={fmtPct(summary.rebalance_realized_turnover ?? 0)} />
             <RunCardStat label={i18n.t("runDetail.turnoverMean")} value={fmtPct(summary.turnover_mean)} />
             <RunCardStat label={i18n.t("runDetail.turnoverMax")} value={fmtPct(summary.turnover_max)} />
             <RunCardStat label={i18n.t("runDetail.largestRebalance")} value={summary.largest_rebalance_date || "-"} />
@@ -732,7 +807,7 @@ function KeyValueTable({ data, empty, monospaceValues = false }: { data: Record<
         <tbody>
           {entries.map(([key, value]) => (
             <tr key={key} className="border-b last:border-0 hover:bg-muted/40">
-              <td className="w-36 py-2 ps-4 pr-4 align-top text-muted-foreground">{key}</td>
+              <td className="w-36 break-all py-2 ps-4 pr-4 align-top text-muted-foreground">{key}</td>
               <td className={cn("py-2 align-top", monospaceValues ? "break-all font-mono text-xs" : "break-words text-right tabular-nums")}>{formatRunCardValue(value)}</td>
             </tr>
           ))}
