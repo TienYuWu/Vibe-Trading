@@ -1493,7 +1493,10 @@ class AgentLoop:
                 # memory pressure, so short, low-pressure runs keep their full
                 # tool history available for the model to reference instead of
                 # having every result past the most recent few cleared.
-                if tokens > int(_token_threshold() * 0.5):
+                # Never on a grounding correction turn: it has no tools, so a
+                # cleared result cannot be re-fetched and the draft cannot be
+                # fixed against its evidence.
+                if tokens > int(_token_threshold() * 0.5) and not grounding_correction_text_only:
                     self._microcompact_and_unblock(messages, trace, iteration)
                     tokens = estimate_tokens(messages)
 

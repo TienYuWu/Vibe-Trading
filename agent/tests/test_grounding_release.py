@@ -751,6 +751,47 @@ def test_grounding_revision_turn_is_text_only(tmp_path: Path) -> None:
     ]
 
 
+def test_grounding_revision_turn_keeps_its_evidence(tmp_path: Path, monkeypatch) -> None:
+    """The correction turn has no tools, so microcompact must not clear results.
+
+    Live run 20260929_010911 (Qwen3.8 on vLLM): microcompact cleared all six
+    tools' results on the correction turn. The model could neither see its
+    data nor re-fetch it, answered "Re-fetching the underlying tool results",
+    and that sentence carried no figures, passed the gate and was released as
+    the successful answer.
+    """
+    import src.agent.loop as loop_module
+
+    # Above the microcompact line (0.5x threshold), below collapse (0.7x).
+    monkeypatch.setattr(
+        loop_module, "estimate_tokens", lambda _m: int(loop_module._token_threshold() * 0.6)
+    )
+    compacted_at: list[int] = []
+    original = AgentLoop._microcompact_and_unblock
+
+    def _record(self, messages, trace, iteration):
+        compacted_at.append(iteration)
+        return original(self, messages, trace, iteration)
+
+    monkeypatch.setattr(AgentLoop, "_microcompact_and_unblock", _record)
+    rejected = (
+        "562500.SS（Yahoo，CNY）最新收盘价 1.171 元。"
+        "建议买入价为 0.881。"
+    )
+    corrected = "562500.SS（Yahoo，CNY）最新收盘价 1.171 元。"
+    llm = _ScriptedLLM(
+        _SCRIPT_HEAD + [_Response(content=rejected), _Response(content=corrected)]
+    )
+
+    result, _events, _agent = _run(tmp_path, llm, max_iterations=8)
+
+    assert result["status"] == "success"
+    trace = TraceWriter.read(tmp_path / "run")
+    (correction,) = [e for e in trace if e.get("type") == "grounding_correction_text_only"]
+    assert compacted_at, "the token stub did not reach the microcompact line"
+    assert correction["iter"] not in compacted_at
+
+
 def test_grounding_revision_blocks_unoffered_tool_calls(tmp_path: Path, monkeypatch) -> None:
     """A provider cannot escape correction-only mode by emitting a tool call anyway."""
     monkeypatch.setattr("src.agent.loop.MAX_GROUNDING_REVISIONS", 3)
