@@ -875,3 +875,39 @@ def test_words_in_a_price_column_cell_do_not_unbind_it() -> None:
     table = "| 代码 | 收盘 |\n|---|---|\n| 159516.SZ | 300 est |\n"
     shapes = {f.text: f.shape for f in scan_figures(table, parse_figures_block(table))}
     assert shapes["300"] == "measured"
+
+
+def _profile_ledger(tmp_path: Path) -> GroundingLedger:
+    """get_stock_profile returns earnings_trend as a list, one row per period."""
+    ledger = _ledger(tmp_path)
+    trend = [
+        {"period": period, "eps_avg": eps}
+        for period, eps in (("0q", 28.2), ("+1q", 31.0), ("0y", 107.85274), ("+1y", 142.96))
+    ]
+    ledger.ingest_tool_result(
+        tool_name="get_stock_profile",
+        arguments={"ticker": SYMBOL},
+        result=json.dumps({"ok": True, "data": {"ticker": SYMBOL, "sections": {"earnings_trend": trend}}}),
+        call_id="p1",
+        success=True,
+    )
+    return ledger
+
+
+def test_a_field_ref_without_list_indices_reaches_the_list_rows(tmp_path: Path) -> None:
+    """Live run 20260929_011817: Qwen3.8 cited
+    ``<call>::data.sections.earnings_trend.eps_avg`` for 107.85; the leaf is
+    ``earnings_trend[2].eps_avg``, and the figure was redacted as absent from
+    a call that held it."""
+    ledger = _profile_ledger(tmp_path)
+    ref = "p1::data.sections.earnings_trend.eps_avg"
+
+    quoted = ledger.validate_final_answer(
+        HDR + "2026 共識 EPS 107.85。" + _block(HDR_ROW, f"107.85 | observed | eps | {ref}")
+    )
+    invented = ledger.validate_final_answer(
+        HDR + "2026 共識 EPS 107.99。" + _block(HDR_ROW, f"107.99 | observed | eps | {ref}")
+    )
+
+    assert quoted.valid is True, quoted.issues
+    assert [issue["reason"] for issue in invented.issues] == ["not_in_referenced_call"]

@@ -39,6 +39,9 @@ from src.agent.grounding.figures import (
 
 import re
 
+#: A list position inside an evidence path, as in ``earnings_trend[2].eps_avg``.
+_LIST_INDEX = re.compile(r"\[\d+\]")
+
 #: An answer that relabels a locked listed identity as private contradicts the
 #: resolver, which is an identity finding rather than a figure finding.
 _PRIVATE_ASSERTION_RE = re.compile(
@@ -795,7 +798,15 @@ class _PolicyMixin:
         not make ``close`` ambiguous.
         """
         def named(path: Any) -> bool:
-            return isinstance(path, str) and (path == field or path.endswith("." + field))
+            if not isinstance(path, str):
+                return False
+            # A ref may leave out list indices ("earnings_trend.eps_avg" for
+            # "earnings_trend[2].eps_avg"): it then names every row's leaf,
+            # and the value check still has to match one of them.
+            return any(
+                candidate == field or candidate.endswith("." + field)
+                for candidate in (path, _LIST_INDEX.sub("", path))
+            )
 
         records = [
             record
