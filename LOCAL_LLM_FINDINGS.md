@@ -2,7 +2,9 @@
 
 追查「agent 跑半小時還超時」的完整過程與結論。所有數字都是實測，不是估算。
 
-**結論先講：回測可用，研究型對話不可用。** 差別在 output token 量，不是設定。
+**結論先講（2026-09-29 更新）：回測與研究型對話都可用。** 最早「研究不可用」的結論作廢：
+慢的主因是推理混進答案、溫度 0 與壓縮門檻，不是模型能力。現行設定與 A100 建議見文末
+「[現行建議](#現行建議2026-09-29)」。下面依時間保留完整追查過程。
 
 ---
 
@@ -107,7 +109,7 @@ Agent 停止後 vLLM 仍在產生 —— 客戶端斷線沒有傳達到，請求
 
 ---
 
-## 現行設定
+## 當時的設定（已過時，現行版本見文末）
 
 `agent/.env`（gitignored，此處記錄值）：
 
@@ -338,6 +340,81 @@ Ollama 那次的回答因此把本益比算成 127 倍（實際約 37 倍）；v
 
 修法：年度損益表改為四季加總，缺季的年度直接不報；資產負債表與現金流維持取 12 月。
 季度現金流另標 `basis: year_to_date`。FinMind 實測 2025 EPS 66.26、2024 45.26、2023 32.34。
+
+### 降級處理：grounding 與 Qwen 的三個摩擦點（已修）
+
+| 問題 | 症狀 | 修法 |
+|---|---|---|
+| gate 只認簡體「万／亿」 | 「3,809 億」當成 3809 比對，40 個數字被遮 | 加入「萬、億、兆」 |
+| 修正輪沒有工具，但 microcompact 同輪清掉資料 | 模型回「我要重抓資料」，無數字、通過 gate、以 success 放行 | 修正輪不做 microcompact |
+| 欄位路徑省略列表索引 | `earnings_trend.eps_avg` 對不到 `earnings_trend[2].eps_avg`，被判「不在該次呼叫」 | 比對時也試去掉索引的路徑；數值仍須相符 |
+| 修正輪回一句話放棄草稿 | 4.5k 字草稿變 139 字「讓我先驗算」，以 success 放行 | 回覆短於草稿 1/5 時，改放行遮蔽後的原草稿 |
+
+最後一次端對端（5090、vLLM NVFP4、「2330的前景」）：**17.6 分鐘**，4 次退回，3,033 字報告，22 個數字被遮。
+四季 EPS、技術指標、法人評等都正確；被遮的多是 Yahoo 共識 EPS 與目標價。
+
+時間幾乎都花在退回重寫：前三份草稿各 51–81 個問題，主要是
+「數字未宣告」（約 25 個）與「推導式 gate 算不出來」（14–39 個）。
+這是 27B 模型對 upstream figures 區塊規範的遵循度問題，不是 bug。
+
+---
+
+## 現行建議（2026-09-29）
+
+### 設定
+
+`agent/.env`：
+
+```bash
+LANGCHAIN_PROVIDER=openai
+LANGCHAIN_MODEL_NAME=Qwen/Qwen3.8-27B
+OPENAI_BASE_URL=http://host.docker.internal:8000/v1
+LANGCHAIN_TEMPERATURE=1.0                    # Qwen 官方：思考模式 1.0；0.0 會無限推理
+TOKEN_THRESHOLD=90000                        # 需搭配 131k context；65k context 用 40000
+VIBE_TRADING_LLM_TIMEOUT_SECONDS=900
+VIBE_TRADING_RUN_STALL_TIMEOUT_SECONDS=3600  # 須 > LLM timeout × (1 + MAX_RETRIES)
+VIBE_TRADING_SSE_TIMEOUT=900                 # 須 >= LLM timeout
+```
+
+vLLM 三個必要參數，換機器也不能少：
+
+- `--reasoning-parser qwen3`：少了它，推理進 `content`，grounding 核對推理文字，退回迴圈失控
+- `--max-model-len 131072`：少了它，microcompact 每輪清資料，失憶迴圈
+- `--served-model-name Qwen/Qwen3.8-27B`：跟 `.env` 的模型名一致
+
+### A100 要用量化版
+
+| | RTX 5090 實測 | A100 BF16 實測 | A100 量化（預估） |
+|---|---|---|---|
+| 權重 | NVFP4 21.9GB | BF16 約 54GB | FP8 30.9GB／INT4 約 20GB |
+| decode | 45–60 tok/s | 23 tok/s | FP8 約 1.7 倍、INT4 約 2–2.5 倍 |
+| 「前景」一次 | 17.6 分鐘 | 推估 30 分鐘以上 | 接近 5090 |
+
+A100 沒有 FP4 硬體，NVFP4 版不能用。可選：
+
+- `Qwen/Qwen3.8-27B-FP8`（官方，30.9GB）：Ampere 上走 weight-only FP8，品質最接近原版
+- `cyankiwi/Qwen3.8-27B-AWQ-INT4`、`RedHatAI/Qwen3.8-27B-INT4`（社群，約 20GB）：更快，品質要自己驗
+
+A100 80GB 放得下 131k context 的 KV cache，量化後餘裕更多。**以上 A100 量化數字未實測。**
+
+```bash
+vllm serve Qwen/Qwen3.8-27B-FP8 --served-model-name Qwen/Qwen3.8-27B \
+  --max-model-len 131072 --gpu-memory-utilization 0.90 \
+  --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
+```
+
+### 哪類問題快
+
+時間取決於**答案裡有多少數字**，不是分析類型。每個數字都要過 grounding，數字越多越容易被退回重寫。
+
+| 問法 | 數字量 | 實測／預期 |
+|---|---|---|
+| 「回測 2330 均線交叉 2020–2025」 | 少，照抄結果檔 | 2 分鐘（A100 實測） |
+| 「2330 近 60 日均線、RSI、量能，判斷短線趨勢」 | 少，全來自工具 | 快 |
+| 「2330 最近四季 EPS 與毛利率」 | 中 | 快 |
+| 「2330的前景」 | 50–80 個，含大量推導 | 6–18 分鐘（5090 實測） |
+
+開放式問題拆成幾個窄問題，通常比一次問「前景」快，被遮的數字也少。
 
 ---
 
