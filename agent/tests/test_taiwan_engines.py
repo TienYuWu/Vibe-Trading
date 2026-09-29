@@ -905,6 +905,23 @@ class TestTaiwanFundamentalsAndNews:
         assert _finmind_annual(rows, statement) == [rows[0]]
 
 
+class TestTraditionalChineseMagnitudes:
+    """Answers are pinned to Traditional Chinese, but the grounding gate only
+    knew the Simplified marks. "3,809 億" read as 3809 against FinMind's raw
+    TWD 3.8e11, and a 2330 report came back with 40 figures redacted."""
+
+    @pytest.mark.parametrize(
+        "text, multiplier",
+        [("3809億元", 1e8), ("2.4萬張", 1e4), ("3.81兆", 1e12), ("2.4万", 1e4), ("21.1亿", 1e8)],
+    )
+    def test_magnitude_mark_scales_the_figure(self, text: str, multiplier: float) -> None:
+        import re
+
+        from src.agent.grounding.figures import magnitude_suffix
+
+        assert magnitude_suffix(text, re.match(r"[\d.,]+", text).end())[0] == multiplier
+
+
 class TestToolAllowlist:
     """Every tool schema is re-sent on every LLM call, so the registry is a
     fixed per-iteration cost, not a one-off. 107 tools measure 34,631 tokens

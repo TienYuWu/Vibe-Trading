@@ -89,7 +89,11 @@ _POINT_MARKS = (("bps", 0.01), ("pp", 1.0), ("bp", 0.01))
 
 # Magnitude marks glued to a figure ("24.6M", "2.4万"): a symbol set like the
 # currency marks. They scale the comparison with evidence and never decide shape.
-_MAGNITUDES = {"K": 1e3, "M": 1e6, "B": 1e9, "千": 1e3, "万": 1e4, "亿": 1e8}
+# Traditional 萬/億 are the same units; 兆 is 10^12 as Taiwan reports use it.
+_MAGNITUDES = {
+    "K": 1e3, "M": 1e6, "B": 1e9, "千": 1e3,
+    "万": 1e4, "亿": 1e8, "萬": 1e4, "億": 1e8, "兆": 1e12,
+}
 
 # A CJK currency word is at most three characters (人民币); bounding the run
 # keeps 元宵/元件, inside longer CJK runs, from reading as money.
