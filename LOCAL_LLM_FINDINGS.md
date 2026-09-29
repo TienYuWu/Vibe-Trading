@@ -231,6 +231,114 @@ docker run --gpus all -p 8000:8000 -v hf_cache:/root/.cache/huggingface vllm/vll
 量測：`llm_usage.json` 的 `totals.output_tokens`、`trace.jsonl` 的 `answer_rejected` 次數與 `end.degraded`、總耗時。
 先做 A/B 就能驗證根因；A 組若在 5090 上仍出現退回迴圈，B 組沒有，就定案。
 
+### 2026-09-29 實測：本機 Ollama（RTX 5090）
+
+```bash
+docker run -d --name ollama-qwen --gpus all -p 127.0.0.1:11434:11434 \
+  -v ollama:/root/.ollama \
+  -e OLLAMA_CONTEXT_LENGTH=65536 -e OLLAMA_FLASH_ATTENTION=1 -e OLLAMA_KV_CACHE_TYPE=q8_0 \
+  ollama/ollama:latest                       # 0.34.4
+docker exec ollama-qwen ollama pull qwen3.8:27b   # Q4_K_M，17GB
+
+# app 端用環境變數覆蓋，不動 agent/.env
+docker compose run --rm -e LANGCHAIN_PROVIDER=ollama -e LANGCHAIN_MODEL_NAME=qwen3.8:27b \
+  vibe-trading vibe-trading run -p "2330的前景" --no-rich
+```
+
+| 項目 | 結果 |
+|---|---|
+| decode（熱機） | **89 tok/s**，A100 BF16 的 3.9 倍 |
+| VRAM | 24.7GB（含 Windows 桌面約 4GB） |
+| 推理分離 | Ollama `/v1` 自動把推理放在 `reasoning` 欄位，不需額外設定 |
+| 工具呼叫 | 正常 |
+| agent run | **失敗**，15.6 分鐘，`empty_model_response` |
+
+agent run 的數字：
+
+- `answer_rejected` = **0**。推理不再進 `content`，grounding 死亡螺旋消失，根因成立。
+- 但 iter 4 與 iter 15 各輸出約 46k token，輸入 + 輸出 = 65,532 / 65,536，**撞上 context 上限**。
+  模型一直在想、沒有收尾，最後 content 和 tool call 都空的。
+- 15 次呼叫裡壓縮了 8 次，同一份行情被重抓 7 次。
+
+新的疑點：`agent/.env` 設 `LANGCHAIN_TEMPERATURE=0.0`，但 Qwen3.8 官方建議 thinking 模式用
+`temperature=1.0, top_p=0.95, top_k=20`，並警告低溫可能無限重複。
+openai / ollama 路徑也沒有設 `max_tokens`，推理沒有上限，只能靠撞牆結束。
+
+`TOKEN_THRESHOLD=24000` 是工具定義還佔 34.6k 時定的；白名單後剩約 7k，這個門檻太低，造成反覆壓縮。
+
+重跑第二輪：`LANGCHAIN_TEMPERATURE=1.0`、`TOKEN_THRESHOLD=40000`
+
+```bash
+docker compose run -d --name vt-ollama-run2 \
+  -e LANGCHAIN_PROVIDER=ollama -e LANGCHAIN_MODEL_NAME=qwen3.8:27b \
+  -e LANGCHAIN_TEMPERATURE=1.0 -e TOKEN_THRESHOLD=40000 \
+  vibe-trading vibe-trading run -p "2330的前景" --no-rich
+```
+
+**成功，1.3 分鐘**，4 次呼叫、輸出 4,084 token，退回 1 次後一次修正通過。
+
+### 2026-09-29 實測：本機 vLLM（RTX 5090）
+
+```bash
+docker run -d --name vllm-qwen --gpus all --ipc=host -p 127.0.0.1:8000:8000 \
+  -v hf_cache:/root/.cache/huggingface \
+  vllm/vllm-openai:latest \
+  --model nvidia/Qwen3.8-27B-NVFP4 --served-model-name Qwen/Qwen3.8-27B \
+  --max-model-len 131072 --kv-cache-dtype fp8_e4m3 \
+  --gpu-memory-utilization 0.90 --max-num-seqs 2 \
+  --limit-mm-per-prompt '{"image":0,"video":0}' \
+  --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
+
+# served-model-name 跟 agent/.env 的 LANGCHAIN_MODEL_NAME 一致，.env 不用改
+docker compose run --rm vibe-trading vibe-trading run -p "2330的前景" --no-rich
+```
+
+模型先下載到 volume：`hf download nvidia/Qwen3.8-27B-NVFP4`（21.3GB）。vLLM 0.30.0，啟動約 2 分鐘。
+
+| 項目 | vLLM NVFP4 | Ollama Q4_K_M |
+|---|---|---|
+| decode | 60 tok/s | 89 tok/s |
+| VRAM | 28.5GB（KV cache 173k token） | 24.7GB |
+| 推理分離 | 需 `--reasoning-parser qwen3` | 自動 |
+| agent run | **成功，9.9 分鐘**，12 次呼叫、輸出 32k | **成功，1.3 分鐘**，4 次呼叫、輸出 4k |
+
+兩次 run 的差距主要是模型這次查得比較深（17 個工具呼叫），不是引擎本身。
+各只有一次樣本，要比較引擎得各跑幾次。
+
+注意：上面兩次 agent run 用的是 09-07 建的舊 image。merge 後 zh-TW 語系檔缺 262 個新 key，
+frontend 型別檢查失敗、image 一直建不起來，`docker compose run` 就沿用舊的。補齊 key 後重建才是新程式。
+
+**兩邊都能用。** 關鍵是三件事，跟引擎無關：推理要跟答案分開、溫度照官方設 1.0、壓縮門檻回到 40000。
+A100 那次的 25–30 分鐘與「不可用」結論作廢。
+
+### merge 後的新程式：兩個新坑
+
+用新程式、照 `.env` 跑 vLLM，前兩次都失敗：
+
+1. **400 `System message must be at the beginning.`**（7.1 分鐘）
+   模型回空內容時，loop 以 `role=system` 補一則提醒；Qwen 的 chat template 只收開頭的 system。
+   upstream #1112 修過同類問題但漏了三處，已照同樣方式改成 user 訊息加 `<system>` 標籤。
+2. **失憶迴圈**（27 分鐘仍未結束，手動停止）
+   upstream 的 microcompact 在估算 token 超過 `TOKEN_THRESHOLD × 0.5` 時，只留最近 3 筆工具結果；
+   09-05 起被清掉的結果又允許重新呼叫。估算值（中文係數 × 1.4）一開始就超過 20k，
+   所以每一輪都清、每一輪都重抓：33 次呼叫、72 次工具呼叫，同一批 6 個工具輪流重跑。
+
+   修法（只改設定）：vLLM `--max-model-len 131072`（KV cache 放得下 185k），
+   `TOKEN_THRESHOLD=90000`，微壓縮延到估算 45k 才啟動。
+   **注意：這個門檻要搭配 131k context；Ollama 若維持 65536 就得調回 40000。**
+
+第三次：**成功，6.3 分鐘**，5 次呼叫、microcompact 0 次，EPS 66.26 正確。
+但降級：模型把 FinMind 的元自行換算成「億」，gate 對不上工具數據，40 個數字被遮成「（略※）」。
+
+### 過程中發現的台股資料 bug（已修）
+
+`get_financial_statements` 的台股年度資料只取 12 月那筆。FinMind 的損益表是**單季**值
+（2330 在 2025 Q4 的 EPS 是 19.51，四季加總 66.26），現金流量表才是年初累計。
+Ollama 那次的回答因此把本益比算成 127 倍（實際約 37 倍）；vLLM 那次的回答則自己發現各來源對不上，標註「無法內部自洽」。
+
+修法：年度損益表改為四季加總，缺季的年度直接不報；資產負債表與現金流維持取 12 月。
+季度現金流另標 `basis: year_to_date`。FinMind 實測 2025 EPS 66.26、2024 45.26、2023 32.34。
+
 ---
 
 ## 模型行為觀察
