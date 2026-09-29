@@ -603,6 +603,24 @@ def _replay_context_result(result: str) -> str:
     return json.dumps(replay_payload, ensure_ascii=False)
 
 
+def _abandons_draft(reply: str, draft: str) -> bool:
+    """Whether a correction-turn reply drops the rejected draft instead of revising it.
+
+    A revision cuts or rewords figures and keeps the analysis. A reply under a
+    fifth of the draft's length has thrown the analysis away.
+
+    Args:
+        reply: The correction turn's released text.
+        draft: The rejected draft it was asked to revise.
+
+    Returns:
+        True when the reply cannot be a revision of the draft.
+    """
+    # ponytail: length ratio, not a semantic check; tighten if a genuine
+    # revision ever legitimately shrinks below a fifth.
+    return bool(draft.strip()) and len(reply.strip()) < len(draft.strip()) / 5
+
+
 def _microcompact(messages: list) -> list:
     """Layer 1: silently prune old tool results, keeping the most recent N intact.
 
@@ -1446,6 +1464,7 @@ class AgentLoop:
         # keeps tools available; ordinary correction turns do not.
         grounding_correction_text_only = False
         pending_grounding_draft = ""
+        pending_grounding_validation = None
         llm_usage_summary = _new_llm_usage_summary(self.llm)
         last_response_model: str | None = None
         goal_continuations = 0
@@ -1981,6 +2000,41 @@ class AgentLoop:
                             # The figures block is the model's declaration to
                             # the gate, not answer text.
                             final_content = validation.released_text
+                            if (
+                                grounding_correction_text_only
+                                and pending_grounding_validation is not None
+                                and _abandons_draft(final_content, pending_grounding_draft)
+                            ):
+                                # A reply that drops the analysis ("let me
+                                # recompute them") holds no figures, so it
+                                # validates trivially; it is not a revision.
+                                released = self._grounding.redacted_release(
+                                    pending_grounding_draft, pending_grounding_validation
+                                )
+                                if released is not None:
+                                    trace.write(
+                                        {
+                                            "type": "answer_released_redacted",
+                                            "iter": current_iter,
+                                            "reason": "correction_abandoned_draft",
+                                            "issues": pending_grounding_validation.issues,
+                                        }
+                                    )
+                                    if not buffer_text_output and streamed_chars:
+                                        self._emit(
+                                            "stream_reset",
+                                            {"iter": current_iter, "reason": "correction_abandoned_draft"},
+                                        )
+                                    final_content = released
+                                    self._released_fallback = True
+                                    self._released_fallback_reason = (
+                                        "final answer released with unverified figures "
+                                        "redacted: the correction turn abandoned the draft"
+                                    )
+                                    self._emit(
+                                        "text_delta",
+                                        {"delta": final_content, "iter": current_iter},
+                                    )
                         if not validation.valid:
                             if not forced_grounding_release:
                                 trace.write_text_entry(
@@ -2050,6 +2104,7 @@ class AgentLoop:
                                 )
                             rejected_draft = final_content
                             pending_grounding_draft = rejected_draft
+                            pending_grounding_validation = validation
                             final_content = ""
                             # The budget counts drafts rejected on this
                             # correction path; the last one is released with
@@ -2152,6 +2207,7 @@ class AgentLoop:
                     # research turn and must regain its normal tool access.
                     grounding_correction_text_only = False
                     pending_grounding_draft = ""
+                    pending_grounding_validation = None
                     should_continue_goal = False
                     continuation_snapshot = None
                     _max_cont = _goal_max_continuations()

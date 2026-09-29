@@ -792,6 +792,36 @@ def test_grounding_revision_turn_keeps_its_evidence(tmp_path: Path, monkeypatch)
     assert correction["iter"] not in compacted_at
 
 
+def test_a_correction_turn_that_abandons_the_draft_releases_the_draft_redacted(
+    tmp_path: Path,
+) -> None:
+    """A figure-free non-answer on the correction turn passes the gate trivially.
+
+    Live run 20260929_020429 (Qwen3.8 on vLLM): the 4.5k-character draft was
+    rejected, and the text-only correction turn answered "Two derived figures
+    need exact verification ... Let me compute them". That held no figures,
+    validated, and was released as the successful answer.
+    """
+    analysis = "均线空头排列，量能萎缩，短线仍以观察为主。" * 40
+    rejected = (
+        "562500.SS（Yahoo，CNY）最新收盘价 1.171 元。" + analysis + "建议买入价为 0.881。"
+    )
+    abandoned = "Two derived figures need exact verification before I rewrite."
+    llm = _ScriptedLLM(
+        _SCRIPT_HEAD + [_Response(content=rejected), _Response(content=abandoned)]
+    )
+
+    result, _events, _agent = _run(tmp_path, llm, max_iterations=8)
+
+    content = result["content"]
+    assert abandoned not in content
+    assert "1.171" in content and analysis in content
+    assert "0.881" not in content
+    assert result.get("degraded") is True
+    trace = TraceWriter.read(tmp_path / "run")
+    assert [e for e in trace if e.get("type") == "answer_released_redacted"]
+
+
 def test_grounding_revision_blocks_unoffered_tool_calls(tmp_path: Path, monkeypatch) -> None:
     """A provider cannot escape correction-only mode by emitting a tool call anyway."""
     monkeypatch.setattr("src.agent.loop.MAX_GROUNDING_REVISIONS", 3)
