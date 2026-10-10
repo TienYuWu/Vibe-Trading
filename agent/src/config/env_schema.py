@@ -250,7 +250,7 @@ class DataConfig(_EnvBase):
     etoro_user_key: str = Field(alias="ETORO_USER_KEY", default="")
     # Per-market source-order overrides (Settings page "source priority").
     # Value: comma-separated permutation of the market's default chain, e.g.
-    # MARKET_DATA_ORDER_A_SHARE=tushare,tencent,mootdx,... Applied by
+    # MARKET_DATA_ORDER_A_SHARE=tushare,tencent,eastmoney,... Applied by
     # backtest.loaders.registry.refresh_source_order_overrides() (which reads
     # os.getenv directly); declared here for visibility/validation parity.
     market_data_order_a_share: str = Field(alias="MARKET_DATA_ORDER_A_SHARE", default="")
@@ -427,6 +427,9 @@ class AgentTuningConfig(_EnvBase):
     ``src/tools/web_search_tool.py``, ``api_server.py``.
     """
 
+    # Deprecated: counted chars/4 of messages without tool schemas, so no value
+    # tuned against it means anything under real-token accounting. Read only to
+    # warn (src/agent/context_budget.py); compaction ignores it.
     token_threshold: int = Field(alias="TOKEN_THRESHOLD", default=40000)
     # Pins the final-answer language. Empty keeps the default behaviour of
     # inferring it from the user's message, which a mid-size local model
@@ -439,6 +442,15 @@ class AgentTuningConfig(_EnvBase):
     # is a per-iteration fixed cost -- 107 tools measure ~34.6k tokens.
     vibe_trading_enabled_tools: str = Field(
         alias="VIBE_TRADING_ENABLED_TOOLS", default=""
+    )
+    vibe_trading_context_window: int | None = Field(
+        alias="VIBE_TRADING_CONTEXT_WINDOW", default=None, gt=0,
+    )
+    # Cost ceiling on the prompt the loop lets a run grow to before compacting,
+    # whatever the model's window. The largest healthy research run measured
+    # on 2026-09-29 sent 154K real input tokens.
+    vibe_trading_context_max_tokens: int = Field(
+        alias="VIBE_TRADING_CONTEXT_MAX_TOKENS", default=200_000, gt=0,
     )
     vt_heartbeat_interval_s: float = Field(alias="VT_HEARTBEAT_INTERVAL_S", default=3.0)
     vt_reasoning_delta_min_interval_s: float = Field(

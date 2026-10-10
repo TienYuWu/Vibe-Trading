@@ -37,6 +37,7 @@ from backtest.engines.taiwan_futures import (
 from backtest.loaders.finmind_loader import _resolve_dataset
 from backtest.loaders.registry import VALID_SOURCES
 from backtest.models import Position
+from tests.loader_contract import assert_loader_contract
 
 
 @pytest.fixture(autouse=True)
@@ -458,6 +459,7 @@ class TestFinMindLoader:
             {"date": "2024-01-02", "open": 590.0, "max": 593.0, "min": 589.0,
              "close": 593.0, "Trading_Volume": 27997826, "Trading_money": 16549619798},
         ])
+        assert_loader_contract(frame, context="finmind equity")
         assert frame["amount"].iloc[0] == 16549619798
         assert frame["volume"].iloc[0] == 27997826
 

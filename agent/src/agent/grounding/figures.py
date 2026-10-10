@@ -28,6 +28,12 @@ from src.agent.grounding.identity import _CANONICAL_SYMBOL_RE
 #: the answer must retain more digits instead of widening its evidence band.
 ROUNDED_BAND = 0.005
 
+#: A declared value written as a fraction of two integers ("1/3").
+_FRACTION_RE = re.compile(r"([1-9]\d{0,2})\s*/\s*([1-9]\d{0,2})")
+
+#: Marks of a multiple a declared value may carry ("5.5x", "3 倍").
+_MULTIPLE_MARKS = frozenset({"x", "X", "×", "倍"})
+
 #: The five roles a declaration may carry (spec §2).
 ROLES = ("observed", "derived", "proposed", "cited", "count")
 
@@ -622,6 +628,10 @@ def _parse_value(
         exactly one number and its marks.
     """
     field = _normalize(text).text.strip()
+    fraction = _FRACTION_RE.fullmatch(field)
+    if fraction is not None:
+        # "1/3" for an equal weight: a value, not two numbers.
+        return int(fraction.group(1)) / int(fraction.group(2)), False, field.replace(" ", "")
     tokens = _numbers(field, decimal_commas=decimal_commas)
     if len(tokens) != 1:
         return None
@@ -630,10 +640,11 @@ def _parse_value(
     if rest[:1] in _MAGNITUDES and not _is_currency_mark(rest):
         rest = rest[1:].lstrip()
     unit, consumed = _percent_mark(rest, 0)
-    if not (
-        _is_currency_mark(rest[consumed:].strip())
-        and _is_currency_mark(field[: token.start].strip())
-    ):
+    tail = rest[consumed:].strip()
+    if not unit and tail in _MULTIPLE_MARKS:
+        # "5.5x": a multiple, written the way the answer writes it.
+        tail = ""
+    if not (_is_currency_mark(tail) and _is_currency_mark(field[: token.start].strip())):
         return None
     reading = _reading(token.sign, token.digits, unit)
     if reading is None:

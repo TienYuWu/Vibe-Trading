@@ -1,6 +1,6 @@
 {
   "app": {
-    "version": "v0.1.15"
+    "version": "v0.1.16"
   },
   "charts": {
     "noPriceData": "這個標的還沒有價格資料",

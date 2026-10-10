@@ -20,6 +20,7 @@ import {
   type ChannelConfigEntry,
   type ChannelFieldHint,
   type ChannelPutBody,
+  type ChannelPutResult,
   type ChannelTestBody,
   type ChannelTestResult,
 } from "@/lib/api";
@@ -140,6 +141,21 @@ const GUIDE_DEFS: Record<
       docsLabel: t("settings.channels.guides.websocket.docsLabel"),
     }),
   },
+  feishu: {
+    docsUrl: "https://open.feishu.cn/",
+    build: (t) => ({
+      title: t("settings.channels.guides.feishu.title"),
+      intro: t("settings.channels.guides.feishu.intro"),
+      steps: [
+        t("settings.channels.guides.feishu.step1"),
+        t("settings.channels.guides.feishu.step2"),
+        t("settings.channels.guides.feishu.step3"),
+        t("settings.channels.guides.feishu.step4"),
+        t("settings.channels.guides.feishu.step5"),
+      ],
+      docsLabel: t("settings.channels.guides.feishu.docsLabel"),
+    }),
+  },
 };
 
 export interface ChannelConfigPanelProps {
@@ -180,6 +196,7 @@ export function ChannelConfigPanel({
   const [error, setError] = useState<string | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [enableAnyway, setEnableAnyway] = useState(false);
+  const [applyResult, setApplyResult] = useState<ChannelPutResult | null>(null);
 
   useEffect(() => {
     // A freshly fetched entry re-seeds non-secret fields (typed secret drafts
@@ -227,6 +244,7 @@ export function ChannelConfigPanel({
       "settings.channels.fields.email.smtp_port": { label: t("settings.channels.fields.email.smtp_port.label"), help: t("settings.channels.fields.email.smtp_port.help") },
       "settings.channels.fields.email.smtp_username": { label: t("settings.channels.fields.email.smtp_username.label"), help: t("settings.channels.fields.email.smtp_username.help") },
       "settings.channels.fields.email.smtp_password": { label: t("settings.channels.fields.email.smtp_password.label"), help: t("settings.channels.fields.email.smtp_password.help") },
+      "settings.channels.fields.email.pdf_password": { label: t("settings.channels.fields.email.pdf_password.label"), help: t("settings.channels.fields.email.pdf_password.help") },
       "settings.channels.fields.email.smtp_use_tls": { label: t("settings.channels.fields.email.smtp_use_tls.label"), help: t("settings.channels.fields.email.smtp_use_tls.help") },
       "settings.channels.fields.email.smtp_use_ssl": { label: t("settings.channels.fields.email.smtp_use_ssl.label"), help: t("settings.channels.fields.email.smtp_use_ssl.help") },
       "settings.channels.fields.email.verify_tls": { label: t("settings.channels.fields.email.verify_tls.label"), help: t("settings.channels.fields.email.verify_tls.help") },
@@ -243,6 +261,7 @@ export function ChannelConfigPanel({
       "settings.channels.fields.email.allow_from": { label: t("settings.channels.fields.email.allow_from.label"), help: t("settings.channels.fields.email.allow_from.help") },
       "settings.channels.fields.email.verify_dkim": { label: t("settings.channels.fields.email.verify_dkim.label"), help: t("settings.channels.fields.email.verify_dkim.help") },
       "settings.channels.fields.email.verify_spf": { label: t("settings.channels.fields.email.verify_spf.label"), help: t("settings.channels.fields.email.verify_spf.help") },
+      "settings.channels.fields.email.trusted_authserv_id": { label: t("settings.channels.fields.email.trusted_authserv_id.label"), help: t("settings.channels.fields.email.trusted_authserv_id.help") },
       "settings.channels.fields.email.allowed_attachment_types": { label: t("settings.channels.fields.email.allowed_attachment_types.label"), help: t("settings.channels.fields.email.allowed_attachment_types.help") },
       "settings.channels.fields.email.max_attachment_size": { label: t("settings.channels.fields.email.max_attachment_size.label"), help: t("settings.channels.fields.email.max_attachment_size.help") },
       "settings.channels.fields.email.max_attachments_per_email": { label: t("settings.channels.fields.email.max_attachments_per_email.label"), help: t("settings.channels.fields.email.max_attachments_per_email.help") },
@@ -262,6 +281,19 @@ export function ChannelConfigPanel({
       "settings.channels.fields.websocket.ping_timeout_s": { label: t("settings.channels.fields.websocket.ping_timeout_s.label"), help: t("settings.channels.fields.websocket.ping_timeout_s.help") },
       "settings.channels.fields.websocket.ssl_certfile": { label: t("settings.channels.fields.websocket.ssl_certfile.label"), help: t("settings.channels.fields.websocket.ssl_certfile.help") },
       "settings.channels.fields.websocket.ssl_keyfile": { label: t("settings.channels.fields.websocket.ssl_keyfile.label"), help: t("settings.channels.fields.websocket.ssl_keyfile.help") },
+      "settings.channels.fields.feishu.app_id": { label: t("settings.channels.fields.feishu.app_id.label"), help: t("settings.channels.fields.feishu.app_id.help") },
+      "settings.channels.fields.feishu.app_secret": { label: t("settings.channels.fields.feishu.app_secret.label"), help: t("settings.channels.fields.feishu.app_secret.help") },
+      "settings.channels.fields.feishu.encrypt_key": { label: t("settings.channels.fields.feishu.encrypt_key.label"), help: t("settings.channels.fields.feishu.encrypt_key.help") },
+      "settings.channels.fields.feishu.verification_token": { label: t("settings.channels.fields.feishu.verification_token.label"), help: t("settings.channels.fields.feishu.verification_token.help") },
+      "settings.channels.fields.feishu.allow_from": { label: t("settings.channels.fields.feishu.allow_from.label"), help: t("settings.channels.fields.feishu.allow_from.help") },
+      "settings.channels.fields.feishu.react_emoji": { label: t("settings.channels.fields.feishu.react_emoji.label"), help: t("settings.channels.fields.feishu.react_emoji.help") },
+      "settings.channels.fields.feishu.done_emoji": { label: t("settings.channels.fields.feishu.done_emoji.label"), help: t("settings.channels.fields.feishu.done_emoji.help") },
+      "settings.channels.fields.feishu.tool_hint_prefix": { label: t("settings.channels.fields.feishu.tool_hint_prefix.label"), help: t("settings.channels.fields.feishu.tool_hint_prefix.help") },
+      "settings.channels.fields.feishu.group_policy": { label: t("settings.channels.fields.feishu.group_policy.label"), help: t("settings.channels.fields.feishu.group_policy.help") },
+      "settings.channels.fields.feishu.reply_to_message": { label: t("settings.channels.fields.feishu.reply_to_message.label"), help: t("settings.channels.fields.feishu.reply_to_message.help") },
+      "settings.channels.fields.feishu.streaming": { label: t("settings.channels.fields.feishu.streaming.label"), help: t("settings.channels.fields.feishu.streaming.help") },
+      "settings.channels.fields.feishu.domain": { label: t("settings.channels.fields.feishu.domain.label"), help: t("settings.channels.fields.feishu.domain.help") },
+      "settings.channels.fields.feishu.topic_isolation": { label: t("settings.channels.fields.feishu.topic_isolation.label"), help: t("settings.channels.fields.feishu.topic_isolation.help") },
     }),
     [t],
   );
@@ -347,21 +379,35 @@ export function ChannelConfigPanel({
     setErrorDetail(detail || null);
   };
 
+  const applyMessage = (result: ChannelPutResult) => {
+    if (result.applied === "refreshed") return t("settings.channels.config.appliedInPlace");
+    if (result.applied === "reset" && result.reset_reason) return t("settings.channels.config.appliedReset");
+    if (result.applied === "deferred" || result.applied === "reset") return t("settings.channels.config.appliedOnStart");
+    return t("settings.channels.config.appliedReconnect");
+  };
+
+  const showApplied = (result: ChannelPutResult, fallback: string) => {
+    setApplyResult(result);
+    if (result.applied === "reset" && result.reset_reason) toast.info(applyMessage(result));
+    else toast.success(result.applied === "refreshed" ? applyMessage(result) : fallback);
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setError(null);
     setErrorDetail(null);
     setEnableAnyway(false);
+    setApplyResult(null);
     const body: ChannelPutBody = { config: buildPatch() };
     for (const field of entry.fields) {
       if (field.secret && clears[field.key]) body[`clear_${field.key}`] = true;
     }
     try {
-      await api.putChannelConfig(name, body);
+      const result = await api.putChannelConfig(name, body);
       setSecretDrafts({});
       setClears({});
-      toast.success(t("settings.channels.config.saved"));
+      showApplied(result, t("settings.channels.config.saved"));
       await onChanged();
     } catch (saveError) {
       const failure = describeApiFailure(saveError);
@@ -409,12 +455,13 @@ export function ChannelConfigPanel({
     setError(null);
     setErrorDetail(null);
     setEnableAnyway(false);
+    setApplyResult(null);
     try {
-      await api.putChannelConfig(name, {
+      const result = await api.putChannelConfig(name, {
         config: { enabled: next },
         skip_verify: options?.skipVerify,
       });
-      toast.success(
+      showApplied(result,
         next
           ? t("settings.channels.config.enabledToast")
           : t("settings.channels.config.disabledToast"),
@@ -636,6 +683,18 @@ export function ChannelConfigPanel({
               {t("settings.channels.config.enableRejectedDetail", { detail: errorDetail })}
             </div>
           ) : null}
+        </div>
+      ) : null}
+
+      {applyResult ? (
+        <div
+          role="status"
+          className={`rounded-md border px-3 py-2 text-sm ${applyResult.reset_reason
+            ? "border-warning/40 bg-warning/10 text-warning-foreground"
+            : "border-success/30 bg-success/5 text-success"}`}
+        >
+          <div>{applyMessage(applyResult)}</div>
+          {applyResult.reset_reason ? <div className="mt-1 break-words text-xs">{applyResult.reset_reason}</div> : null}
         </div>
       ) : null}
 
