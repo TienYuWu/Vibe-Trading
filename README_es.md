@@ -457,7 +457,7 @@ La mayoría de las ejecuciones siguen la misma ruta de evidencia: enrutar la sol
 
 ## 📡 Fuentes de Datos y Fallback Inteligente
 
-Una sola llamada `get_market_data`, **28 fuentes de datos de mercado**, una de ellas el mercado premium opcional **QVeris** (además del mercado premium opcional **QVeris**). Establece `source: "auto"`: el cargador elige según el símbolo y luego recorre una cadena por mercado ordenada por **riesgo de bloqueo de IP**: primero las fuentes públicas que nunca se bloquean, al final las limitadas o que requieren clave. Cero configuración, sin punto único de fallo.
+Una sola llamada `get_market_data`, **29 fuentes de datos de mercado**, una de ellas el mercado premium opcional **QVeris** (además del mercado premium opcional **QVeris**). Establece `source: "auto"`: el cargador elige según el símbolo y luego recorre una cadena por mercado ordenada por **riesgo de bloqueo de IP**: primero las fuentes públicas que nunca se bloquean, al final las limitadas o que requieren clave. Cero configuración, sin punto único de fallo.
 
 | Fuente | Mercados | Autenticación | Rol |
 |--------|---------|------|------|
@@ -479,6 +479,7 @@ Una sola llamada `get_market_data`, **28 fuentes de datos de mercado**, una de e
 | `mt5` | forex / metales | terminal MT5 | barras de forex/metales de MetaTrader 5 (estilo Exness), 1m–1D |
 | `tickerall` | forex / metales | clave + cuenta (solo lectura) | el mismo feed MT5 del bróker, **alojado**: sin terminal local y en cualquier sistema operativo (solo por selección explícita, nunca en el respaldo automático) |
 | `pykrx` | Corea (KRX: KOSPI/KOSDAQ) | ninguna | barras diarias de KOSPI / KOSDAQ para `.KS` / `.KQ` (extra opcional `krx`) |
+| `finmind` | Taiwán (TWSE/TPEx, TAIFEX) | ninguna | barras diarias de acciones `.TW` / `.TWO` y futuros TAIFEX (`FINMIND_TOKEN` opcional) |
 | `india_broker` | India (NSE/BSE) | login de broker | barras de solo lectura de Zerodha / Shoonya / Dhan para `.NS` / `.BO` (al final de la cadena de fallback) |
 | `local` | cualquiera | ninguna | tu propio CSV / Parquet / DuckDB mediante el prefijo `local:` |
 
@@ -489,6 +490,8 @@ Una sola llamada `get_market_data`, **28 fuentes de datos de mercado**, una de e
 - **HK** → `tencent` · `eastmoney` · `yahoo` · `futu` · `akshare` · `yfinance` · `tushare` · `longbridge` · `local`
 - **India (NSE/BSE)** → `yahoo` · `yfinance` · `india_broker` · `local`
 - **Corea (KOSPI/KOSDAQ)** → `pykrx` · `yahoo` · `yfinance` · `local`
+- **Taiwán (TWSE/TPEx)** → `finmind` · `yahoo` · `yfinance` · `local`
+- **Futuros de Taiwán (TAIFEX)** → `finmind` · `local`
 - **Reino Unido (LSE)** → `yahoo` · `yfinance` · `local` *(solo cotizaciones declaradas en GBP/GBp)*
 - **Cripto** → `okx` · `binance` · `ccxt` · `yfinance` · `local`
 - **Forex / metales** → `mt5` · `akshare` · `yfinance` · `local`
@@ -1826,8 +1829,8 @@ Vibe-Trading/
 │   │   └── providers/              # Abstracción de proveedores LLM
 │   │
 │   └── backtest/                   # Motores de backtest
-│       ├── engines/                #   9 motores + motor compuesto multi-mercado + options_portfolio
-│       ├── loaders/                #   28 fuentes: tushare, okx, nobitex, wallex, binance, yfinance, akshare, baostock, tencent, mootdx, ccxt, futu, pykrx, local, eastmoney, sina, stooq, yahoo, finnhub, alphavantage, tiingo, fmp, longbridge, mt5, qveris, india_broker, tickerall, gildata
+│       ├── engines/                #   11 motores + motor compuesto multi-mercado + options_portfolio
+│       ├── loaders/                #   29 fuentes: tushare, okx, nobitex, wallex, binance, yfinance, akshare, baostock, tencent, mootdx, ccxt, futu, pykrx, finmind, local, eastmoney, sina, stooq, yahoo, finnhub, alphavantage, tiingo, fmp, longbridge, mt5, qveris, india_broker, tickerall, gildata
 │       │   ├── base.py             #   Protocolo DataLoader
 │       │   └── registry.py         #   Registro + cadenas de fallback automáticas
 │       └── optimizers/             #   MVO, equal vol, max div, risk parity
