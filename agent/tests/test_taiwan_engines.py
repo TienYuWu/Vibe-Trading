@@ -923,6 +923,52 @@ class TestTraditionalChineseMagnitudes:
 
         assert magnitude_suffix(text, re.match(r"[\d.,]+", text).end())[0] == multiplier
 
+    @pytest.mark.parametrize(
+        "note, multiplier",
+        [
+            ("2025Q1 單季營收（十億元 TWD）", 1e9),
+            ("營收，百萬元", 1e6),
+            ("淨利（億元）", 1e8),
+            ("成交量（千股）", 1e3),
+            ("revenue, TWD billion", 1e9),
+            ("net income (USD mn)", 1e6),
+            ("2025Q1 單季 EPS（TWD）", 1.0),
+            ("十億分之一的機率", 1.0),
+        ],
+    )
+    def test_declared_unit_in_the_note_is_read(self, note: str, multiplier: float) -> None:
+        from src.agent.grounding.figures import note_scale
+
+        assert note_scale(note) == multiplier
+
+    def test_figure_quoted_in_a_declared_unit_matches_raw_evidence(self, tmp_path) -> None:
+        """Live run 20261011_040238 (Qwen3.8 on A100): quarterly revenue was
+        written as 839.25 with the note "十億元 TWD" against FinMind's raw
+        TWD 839,253,664,000, and all six quarters were redacted."""
+        import json
+
+        from src.agent.grounding import GroundingLedger
+
+        def validate(value: str, note: str):
+            ledger = GroundingLedger(run_dir=tmp_path, user_message="2330 的營收")
+            ledger.ingest_tool_result(
+                tool_name="report_tool",
+                arguments={},
+                result=json.dumps({"ok": True, "data": {"Revenue": 839253664000.0, "EPS": 13.95}}),
+                call_id="c1",
+                success=True,
+            )
+            return ledger.validate_final_answer(
+                f"單季營收 {value}，EPS 13.95。\n\n```figures\n"
+                f"{value} | observed | {note} | c1\n13.95 | observed | EPS | c1\n```"
+            )
+
+        assert validate("839.25", "單季營收（十億元 TWD）").valid is True
+        # The unit is read, not guessed: no note, no scaling.
+        assert validate("839.25", "單季營收").valid is False
+        # Held to the digits written: 840.25 十億 is a different number.
+        assert validate("840.25", "單季營收（十億元 TWD）").valid is False
+
 
 class TestToolAllowlist:
     """Every tool schema is re-sent on every LLM call, so the registry is a

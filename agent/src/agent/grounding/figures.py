@@ -101,6 +101,37 @@ _MAGNITUDES = {
     "万": 1e4, "亿": 1e8, "萬": 1e4, "億": 1e8, "兆": 1e12,
 }
 
+# Units a declaration's note states for its value ("單季營收（十億元 TWD）",
+# "revenue, USD mn"). A CJK unit counts only in front of what it measures, so
+# 十億分之一 and 千金 are not units.
+# ponytail: a fixed word list; add a unit when a live run shows one missing.
+_NOTE_UNITS = {
+    "十億": 1e9, "十亿": 1e9, "千萬": 1e7, "千万": 1e7, "百萬": 1e6, "百万": 1e6,
+    "億": 1e8, "亿": 1e8, "萬": 1e4, "万": 1e4, "兆": 1e12, "千": 1e3, "仟": 1e3,
+    "trillion": 1e12, "tn": 1e12, "billion": 1e9, "bn": 1e9,
+    "million": 1e6, "mn": 1e6, "thousand": 1e3,
+}
+_NOTE_UNIT_RE = re.compile(
+    r"(十億|十亿|千萬|千万|百萬|百万|億|亿|萬|万|兆|千|仟)"
+    r"(?=\s*(?:新?[台臺]幣|美|港|日)?[元圓圆股張张])"
+    r"|\b(trillion|billion|million|thousand|tn|bn|mn)\b",
+    re.IGNORECASE,
+)
+
+
+def note_scale(note: str) -> float:
+    """The unit a declaration's note states for its value, as a multiplier.
+
+    Args:
+        note: The note column of a figures-block line.
+
+    Returns:
+        1e9 for "十億元" or "billion", and so on; 1.0 when no unit is stated.
+    """
+    match = _NOTE_UNIT_RE.search(note or "")
+    return _NOTE_UNITS[match.group(0).lower()] if match else 1.0
+
+
 # A CJK currency word is at most three characters (人民币); bounding the run
 # keeps 元宵/元件, inside longer CJK runs, from reading as money.
 _MAX_CURRENCY_WORD = 3

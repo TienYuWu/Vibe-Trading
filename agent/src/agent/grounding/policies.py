@@ -11,7 +11,7 @@ import ast
 import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -38,6 +38,7 @@ from src.agent.grounding.figures import (
     Figure,
     FiguresBlock,
     _lines_with_offsets,
+    note_scale,
     segment_bounds,
 )
 
@@ -1623,6 +1624,17 @@ class _PolicyMixin:
                 }
                 values = [value for value in values if value not in blocked]
             if self._matches_evidence(figure, values, [] if money else values):
+                return []
+            # The note states the unit the value is written in ("十億元 TWD"
+            # for a raw-TWD revenue); the figure is then held to its written
+            # digits at that scale, like one with a glued magnitude mark.
+            unit = note_scale(declaration.note) if declaration is not None else 1.0
+            if (
+                unit != 1.0
+                and figure.scale == 1.0
+                and not figure.percent
+                and self._matches_evidence(replace(figure, scale=unit), values, [])
+            ):
                 return []
             if tail_risk:
                 return [
